@@ -4,6 +4,7 @@ import { GameManager,SerialQueue } from '../src/manager.js';
 import { Store } from '../src/store.js';
 import { gameComponents,controlComponents,shopPayload,gamePayload,winPayload } from '../src/views.js';
 import { commands } from '../src/commands.js';
+import { ComponentType, MessageFlags, MessagePayload } from 'discord.js';
 
 function setup(t,{roundGapMs=0,payload=async()=>({})}={}){
   const store=new Store(':memory:');let time=1000000;
@@ -51,10 +52,16 @@ test('concurrent seat claims permit exactly one claimant',async t=>{
   assert.equal(results.filter(r=>r.status==='fulfilled').length,1);assert.equal(e.game.seats.filter(Boolean).length,1);
 });
 test('50-player roulette splits components into legal messages; all player IDs are represented',async t=>{
-  const {manager,channel,click}=setup(t),e=await manager.start(channel,'roulette','host');
+  const {manager,channel,click}=setup(t,{payload:gamePayload}),e=await manager.start(channel,'roulette','host');
   for(let i=1;i<=50;i++)await click(e,String(i),'join');e.game.start();await manager.sync(e);
-  for(const m of [e.main,e.extra,e.controls]){assert.ok(m);assert.ok(m.payload.components.length<=5);for(const r of m.payload.components)assert.ok(r.toJSON().components.length<=5);}
-  assert.equal(gameComponents(e.game).flatMap(r=>r.toJSON().components).length,49);
+  const firstRows=e.main.payload.components.slice(2);
+  assert.equal(firstRows.length,5);
+  assert.ok(e.extra.payload.components.length<=5);
+  assert.equal(e.controls.payload.components.length,1);
+  const rows=[...firstRows,...e.extra.payload.components];
+  assert.ok(rows.every(row=>row.toJSON().components.length<=5));
+  const ids=rows.flatMap(row=>row.toJSON().components.map(button=>button.custom_id.split(':').at(-1)));
+  assert.deepEqual(ids,e.game.alive().filter(player=>player.id!==e.game.actor).map(player=>player.id));
 });
 test('shop has latest correct prices and serializable command definitions',async t=>{
   const {manager,channel,click}=setup(t),e=await manager.start(channel,'roulette','host');await click(e,'1','join');
@@ -98,8 +105,16 @@ test('both roulette modes announce the victim publicly, close the turn, and post
     else await click(e,e.game.actor,'kick',target);
     assert.equal(replies.length,replyCount);
     assert.equal(e.game.deadline-time(),5000);
-    assert.deepEqual(oldPanel.payload.components,[]);
-    assert.equal(sent.at(-1).payload.content,`تم طرد اللاعب <@${target}>`);
+    if(type==='roulette'){
+      assert.equal(oldPanel.payload.components[0].type,ComponentType.TextDisplay);
+      assert.equal(oldPanel.payload.components[1].items[0].media.url,'attachment://roulette.png');
+      const buttons=oldPanel.payload.components.slice(2).flatMap(row=>row.components);
+      assert.ok(buttons.length>0&&buttons.every(button=>button.disabled));
+      assert.equal(sent.at(-1).payload.content,`تم طرد <@${target}>، سوف تبدأ الجولة القادمة قريباً ⏰`);
+    }else{
+      assert.deepEqual(oldPanel.payload.components,[]);
+      assert.equal(sent.at(-1).payload.content,`تم طرد اللاعب <@${target}>`);
+    }
     assert.deepEqual(sent.at(-1).payload.allowedMentions.users,[target]);
     assert.equal(e.main,null);
     await expire(e);
@@ -240,7 +255,7 @@ test('random roulette kick is silent, excludes the actor, and disables at exactl
   assert.ok(e.game.player(actor).alive);
   assert.equal(e.game.player(target).alive,false);
   assert.equal(replies.length,replyCount);
-  assert.equal(sent.at(-1).payload.content,`تم طرد اللاعب <@${target}>`);
+  assert.equal(sent.at(-1).payload.content,`تم طرد <@${target}> عشوائيًا، سوف تبدأ الجولة القادمة قريباً ⏰`);
   await expire(e);
   assert.equal(e.game.alive().length,9);
   assert.equal(randomButton().disabled,true);
@@ -264,7 +279,9 @@ test('random kick uses the same reflection as a chosen target',async t=>{
   assert.equal(e.game.player(actor).alive,false);
   assert.equal(e.game.player(target).alive,true);
   assert.equal(store.get('g',target).reflect,0);
-  assert.ok(sent.some(message=>message.payload.content?.includes(`تم طرد اللاعب <@${actor}> بسبب مرتدة`)));
+  const announcement=sent.find(message=>message.payload.content?.startsWith('**هجمة مرتدة!!**'));
+  assert.equal(announcement.payload.content,`**هجمة مرتدة!!** محاولة لطرد <@${target}>، تم تفعيل الخاصية وطرد <@${actor}> 💥.`);
+  assert.deepEqual(announcement.payload.allowedMentions.users,[actor,target]);
 });
 
 test('all registration messages use a native image attachment and only the participant count',async t=>{
@@ -292,7 +309,45 @@ test('regular roulette announces registration completion once before the first t
   assert.deepEqual(lobby.payload.components,[]);
   assert.equal(sent[1].payload.content,'تم الانتهاء من تسجيل جميع اللاعبين');
   assert.equal(sent[2].id,e.main.id);
-  assert.match(sent[2].payload.content,/اختر لاعبًا لطرده/);
+  assert.equal(sent[2].payload.components[0].toJSON().content,`> • <@${e.game.actor}>`);
   await manager.sync(e);
   assert.equal(sent.filter(message=>message.payload.content==='تم الانتهاء من تسجيل جميع اللاعبين').length,1);
+});
+
+test('the roulette turn posts a wheel, 25 numbered targets, and one control row without an embed',async t=>{
+  const {manager,channel,click,store,expire}=setup(t,{payload:gamePayload});
+  const e=await manager.start(channel,'roulette','host');
+  for(let id=1;id<=26;id++)await click(e,String(id),'join');
+  e.game.rng=()=>0;
+  store.adjust('g','1',10,'admin');store.buy('g','1','nuke');
+  await expire(e);
+  const payload=e.main.payload;
+  const serialized=await MessagePayload.create({client:{options:{}}},payload).resolveBody().resolveFiles();
+  assert.equal(serialized.body.flags,MessageFlags.IsComponentsV2);
+  assert.equal(serialized.body.embeds,undefined);
+  assert.equal(serialized.body.content,undefined);
+  assert.equal(serialized.body.components[0].content,'> • <@1>');
+  assert.equal(serialized.body.components[1].items[0].media.url,'attachment://roulette.png');
+  assert.equal(serialized.files[0].name,'roulette.png');
+  const rows=serialized.body.components.slice(2);
+  assert.deepEqual(rows.map(row=>row.components.length),[5,5,5,5,5,4]);
+  assert.ok(rows.slice(0,-1).flatMap(row=>row.components).every(button=>button.style===2&&/^\d+ {2}/.test(button.label)));
+  assert.deepEqual(rows.at(-1).components.map(button=>button.label),['طرد عشوائي','انسحاب','كشف','قنبلة نووية']);
+  assert.equal(e.controls,null);
+});
+
+test('nuke publicly mentions its user once before the winner message, without messaging the eliminated players',async t=>{
+  const {manager,channel,click,expire,store,sent,replies}=setup(t,{payload:gamePayload});
+  const e=await manager.start(channel,'roulette','host');
+  for(const id of ['1','2','3','4'])await click(e,id,'join');
+  e.game.rng=()=>0;
+  store.adjust('g','1',10,'admin');store.buy('g','1','nuke');
+  await expire(e);
+  const privateReplies=replies.length;
+  await click(e,'1','nuke');
+  assert.equal(replies.length,privateReplies);
+  const announcement=sent.at(-2).payload;
+  assert.equal(announcement.content,'**قنبلة نووية!!** تم تفعيل الخاصية من قبل <@1> وطرد جميع اللاعبين ☢️.');
+  assert.deepEqual(announcement.allowedMentions.users,['1']);
+  assert.equal(sent.at(-1).payload.content,'winner:1:1');
 });

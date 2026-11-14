@@ -82,26 +82,30 @@ export class Game {
       this.stage('duel',this.settings.turnMs);
     }
   }
-  kill(id,reason,{bomb=false,survivor=null,withdrawn=false}={}) {
+  kill(id,reason,{bomb=false,survivor=null,withdrawn=false,roulette=null}={}) {
     const player=this.player(id);
     if(!player?.alive)return;
     player.alive=false;
-    this.results.push({id,reason,bomb,survivor,withdrawn});
+    this.results.push({id,reason,bomb,survivor,withdrawn,roulette});
   }
   turn(id) { this.requirePlayer(id); if(this.actor!==id) throw new Error('هذا ليس دورك.'); }
   canKickRandomly() { return this.type==='roulette'&&this.phase==='turn'&&this.alive().length>9; }
   kick(id,target) {
     if(this.phase!=='turn') throw new Error('الطرد غير متاح الآن.');
     this.turn(id);
-    if(target===null){
+    const random=target===null;
+    if(random){
       if(!this.canKickRandomly())throw new Error('الطرد العشوائي يتقفل عند بقاء 9 لاعبين أو أقل.');
       const targets=this.alive().filter(player=>player.id!==id);
       target=this.choose(targets).id;
     }
     this.requirePlayer(target);
     if(id===target) throw new Error('لا تستطيع طرد نفسك؛ استخدم انسحاب.');
-    if(this.store.consume(this.guild,target,'reflect')) this.kill(id,`بسبب مرتدة <@${target}> 🛡️`);
-    else this.kill(target);
+    if(this.store.consume(this.guild,target,'reflect')) {
+      this.kill(id,null,{roulette:{kind:'reflect',target}});
+    } else {
+      this.kill(target,null,{roulette:{kind:random?'random':'manual'}});
+    }
     this.next();
   }
   reveal(id) {
@@ -113,7 +117,7 @@ export class Game {
   nuke(id) {
     if(this.phase!=='turn') throw new Error('النووي متاح في دورك في الروليت فقط.');
     this.turn(id); if(!this.store.consume(this.guild,id,'nuke')) throw new Error('لا تملك قنبلة نووية.');
-    for(const player of this.alive())if(player.id!==id)this.kill(player.id,'بالقنبلة النووية ☢️');
+    for(const player of this.alive())if(player.id!==id)this.kill(player.id,null,{roulette:{kind:'nuke',actor:id}});
     this.finishIfNeeded();
   }
   hide(id,spot) {

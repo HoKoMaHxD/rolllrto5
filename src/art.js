@@ -42,15 +42,15 @@ async function avatar(url) {
     }catch{return null;}
   })();avatarCache.set(url,p);if(avatarCache.size>200)avatarCache.delete(avatarCache.keys().next().value);return p;
 }
-async function portrait(ctx,p,x,y,r) {
+async function portrait(ctx,p,x,y,r,border=null) {
   ctx.save();ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.clip();
   const img=await avatar(p.avatar);
   if(img){const s=Math.min(img.width,img.height);ctx.drawImage(img,(img.width-s)/2,(img.height-s)/2,s,s,x-r,y-r,r*2,r*2);}
-  else{const g=ctx.createLinearGradient(x-r,y-r,x+r,y+r);g.addColorStop(0,'#73459b');g.addColorStop(1,'#2f1d4b');ctx.fillStyle=g;ctx.fillRect(x-r,y-r,r*2,r*2);text(ctx,Array.from(clean(p.name)).slice(0,2).join(''),x,y,r*.7,white,r*1.6);}
+  else{const g=ctx.createLinearGradient(x-r,y-r,x+r,y+r);g.addColorStop(0,border?'#403a34':'#73459b');g.addColorStop(1,border?'#191613':'#2f1d4b');ctx.fillStyle=g;ctx.fillRect(x-r,y-r,r*2,r*2);text(ctx,Array.from(clean(p.name)).slice(0,2).join(''),x,y,r*.7,white,r*1.6);}
   ctx.restore();
   const rim=ctx.createLinearGradient(x-r,y+r,x+r,y-r);
   rim.addColorStop(0,'#201824');rim.addColorStop(.35,'#41284c');rim.addColorStop(.55,'#9e61b7');rim.addColorStop(.7,'#e6b3f4');rim.addColorStop(1,'#45274e');
-  ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.strokeStyle=rim;ctx.lineWidth=4;ctx.stroke();
+  ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.strokeStyle=border||rim;ctx.lineWidth=border?2:4;ctx.stroke();
 }
 const templates=new Map();
 function template(name) {
@@ -59,7 +59,8 @@ function template(name) {
 }
 
 export async function lobbyCard(type) {
-  const source=await template(type==='reverse'?'roulette':type);
+  const card=type==='roulette'?'roulette-lobby':type==='reverse'?'roulette':type;
+  const source=await template(card);
   const canvas=createCanvas(source.width*2,source.height*2);
   const ctx=canvas.getContext('2d');
   ctx.scale(2,2);
@@ -73,6 +74,7 @@ export async function lobbyCard(type) {
   return canvas.toBuffer('image/png');
 }
 export async function rouletteCard(game) {
+  if(game.type==='roulette')return regularRouletteWheel(game);
   const players=game.alive(),n=players.length,height=Math.max(1080,380+Math.ceil(n/2)*56);
   const {canvas,ctx}=await base(1600,height);
   ctx.fillStyle='rgba(18,16,24,.52)';ctx.fillRect(0,0,1600,height);
@@ -98,6 +100,60 @@ export async function rouletteCard(game) {
     text(ctx,p.name,x+195,y+24,23,white,260);
   }
   text(ctx,'الأرقام حسب ترتيب الدخول',1185,height-32,23,'#a995ba',690);
+  return canvas.toBuffer('image/png');
+}
+
+async function regularRouletteWheel(game) {
+  const size=408;
+  const canvas=createCanvas(size,size);
+  const ctx=canvas.getContext('2d');
+  const center=size/2;
+  const radius=196;
+  const players=game.alive();
+  const slice=2*Math.PI/players.length;
+  const selected=players.findIndex(player=>player.id===game.actor);
+  const offset=-(selected+.5)*slice;
+
+  ctx.save();
+  ctx.translate(center,center);
+  for(const [index,player] of players.entries()){
+    const start=offset+index*slice;
+    const angle=start+slice/2;
+    ctx.beginPath();
+    ctx.moveTo(0,0);
+    ctx.arc(0,0,radius,start,start+slice);
+    ctx.closePath();
+    ctx.fillStyle=index%2?'#897156':'#e5dcc4';
+    ctx.fill();
+    ctx.lineWidth=3.4;
+    ctx.strokeStyle='#10100e';
+    ctx.stroke();
+
+    ctx.save();
+    const radialDistance=127;
+    ctx.translate(Math.cos(angle)*radialDistance,Math.sin(angle)*radialDistance);
+    ctx.rotate(angle+(Math.cos(angle)<0?Math.PI:0));
+    // Scale the text to stay inside narrow wedges without dropping player names.
+    const wedgeScale=Math.min(1,slice*3.9);
+    ctx.scale(1,wedgeScale);
+    text(ctx,player.name,0,0,players.length>28?13:14,'#15120f',119);
+    ctx.restore();
+  }
+  ctx.beginPath();
+  ctx.arc(0,0,radius,0,Math.PI*2);
+  ctx.strokeStyle='#0b0b0a';
+  ctx.lineWidth=4;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(42,-14);
+  ctx.lineTo(64,0);
+  ctx.lineTo(42,14);
+  ctx.closePath();
+  ctx.fillStyle='#eee9dc';
+  ctx.fill();
+  ctx.restore();
+
+  await portrait(ctx,players[selected],center,center,50,'#eee9dc');
   return canvas.toBuffer('image/png');
 }
 export async function winnerCard(player,stats) {

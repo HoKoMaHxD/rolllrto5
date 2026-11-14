@@ -1,5 +1,14 @@
 import { Game } from './engine.js';
 import { gamePayload,gameComponents,controlComponents,shopPayload,winPayload,resultsPayload,lobbyContent } from './views.js';
+import { ComponentType, MessageFlags } from 'discord.js';
+
+function lockTurnComponents(components) {
+  return components.map(component=>{
+    const data=component.toJSON();
+    if(data.type!==ComponentType.ActionRow)return data;
+    return {...data,components:data.components.map(button=>({...button,disabled:true}))};
+  });
+}
 
 export class SerialQueue {
   constructor(){this.tails=new Map();}
@@ -60,6 +69,7 @@ export class GameManager {
     if(replacePanel||registrationClosed){
       await this.closePanel(e);
       e.main=null;
+      e.turnComponents=null;
       this.remember(e);
     }
     if(registrationClosed&&g.type==='roulette'){
@@ -73,15 +83,19 @@ export class GameManager {
       return;
     }
     if(g.phase!=='chairs')await this.publishResults(e);
-    if(!g.deadline)g.deadline=this.now()+g.duration;
+    if(!g.deadline&&g.phase!=='turn')g.deadline=this.now()+g.duration;
     const payload=await this.payload(g);
+    if(!g.deadline)g.deadline=this.now()+g.duration;
     const board=gameComponents(g,{eyes:this.eyes});
     const controls=controlComponents(g);
-    const inlineControls=board.length<5;
-    payload.components=board.slice(0,5).concat(inlineControls?controls:[]);
+    const galleryTurn=payload.flags===MessageFlags.IsComponentsV2;
+    const inlineControls=galleryTurn?board.length<=5:board.length<5;
+    const actionRows=board.slice(0,5).concat(inlineControls?controls:[]);
+    payload.components=galleryTurn?payload.components.concat(actionRows):actionRows;
     // Membership updates reuse the existing banner instead of reuploading a PNG for every click.
     if(e.main&&g.phase==='lobby'&&!changed){delete payload.files;delete payload.attachments;}
     if(e.main)await e.main.edit(payload);else e.main=await e.channel.send(payload);
+    e.turnComponents=galleryTurn?payload.components:null;
     e.renderedVersion=g.version;
     e.renderedPhase=g.phase;
     this.remember(e);
@@ -100,7 +114,9 @@ export class GameManager {
   }
   async closePanel(e){
     const keepBoard=['duel','seeking'].includes(e.renderedPhase);
-    const board=keepBoard?gameComponents(e.game,{phase:e.renderedPhase,locked:true,eyes:this.eyes}):[];
+    let board=[];
+    if(e.turnComponents)board=lockTurnComponents(e.turnComponents);
+    else if(keepBoard)board=gameComponents(e.game,{phase:e.renderedPhase,locked:true,eyes:this.eyes});
     const messages=[{message:e.main,components:board},{message:e.extra,components:[]},{message:e.controls,components:[]}];
     await Promise.all(messages.map(async ({message,components})=>{
       if(!message)return;
@@ -131,7 +147,10 @@ export class GameManager {
   async fail(e,error){
     console.error('[GAME_ERROR]',error.code||error.name); // Never log tokens or interaction objects.
     this.forget(e);
-    for(const m of [e.main,e.controls,e.extra])if(m)await m.edit({components:[]}).catch(()=>{});
+    for(const m of [e.main,e.controls,e.extra])if(m){
+      const components=m===e.main&&e.turnComponents?lockTurnComponents(e.turnComponents):[];
+      await m.edit({components,allowedMentions:{parse:[]}}).catch(()=>{});
+    }
     const message=e.game.winner?'تعذر عرض بطاقة الفوز؛ احتُسبت نقطة الفوز والفوزة.':'توقف القيم بسبب خطأ في إرسال الرسائل. راجع صلاحيات البوت وسجل الاستضافة.';
     await e.channel.send({content:message,allowedMentions:{parse:[]}}).catch(()=>{});
   }
@@ -185,7 +204,11 @@ export class GameManager {
         const channel=await client.channels.fetch(row.channel);
         if(channel?.isTextBased()){
           for(const id of [row.main,row.controls,row.extra].filter(Boolean)){
-            try{const m=await channel.messages.fetch(id);await m.edit({components:[]});}catch{}
+            try{
+              const m=await channel.messages.fetch(id);
+              const components=m.flags?.has(MessageFlags.IsComponentsV2)?lockTurnComponents(m.components):[];
+              await m.edit({components,allowedMentions:{parse:[]}});
+            }catch{}
           }
           await channel.send({content:'أُعيد تشغيل البوت؛ أُلغي القيم السابق. النقاط والفوزات والأغراض محفوظة. ابدأ قيمًا جديدًا.',allowedMentions:{parse:[]}});
         }

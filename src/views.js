@@ -1,4 +1,4 @@
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, AttachmentBuilder } from 'discord.js';
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, AttachmentBuilder, TextDisplayBuilder, MediaGalleryBuilder, MessageFlags } from 'discord.js';
 import { GAME_NAMES, ITEMS } from './config.js';
 import { lobbyCard, rouletteCard, winnerCard } from './art.js';
 import { MINE_SQUARES } from './engine.js';
@@ -24,7 +24,7 @@ export function gameComponents(g,{phase=g.phase,locked=false,eyes={}}={}){
   if(phase==='lobby'){
     buttons=[button(g,'join','دخول',ButtonStyle.Success,'',false,'➕'),button(g,'leave','خروج',ButtonStyle.Danger,'',false,'➖')];
     if(g.type==='roulette')buttons.push(button(g,'shop','المتجر',ButtonStyle.Secondary,'',false,'🛒'));
-  } else if(phase==='turn') buttons=g.alive().filter(p=>p.id!==g.actor).map(p=>button(g,'kick',`${p.number} • ${p.name}`.slice(0,70),ButtonStyle.Secondary,p.id));
+  } else if(phase==='turn') buttons=g.alive().filter(p=>p.id!==g.actor).map(p=>button(g,'kick',`${p.number}  ${p.name}`.slice(0,70),ButtonStyle.Secondary,p.id));
   else if(phase==='hiding'||phase==='seeking'){
     const hiding=phase==='hiding';
     buttons=Array.from({length:25},(_,i)=>{
@@ -50,12 +50,12 @@ export function gameComponents(g,{phase=g.phase,locked=false,eyes={}}={}){
 export function controlComponents(g){
   if(g.type!=='roulette'||g.phase!=='turn')return [];
   const controls=[
-    button(g,'withdraw','انسحاب',ButtonStyle.Danger),
+    button(g,'random-kick','طرد عشوائي',ButtonStyle.Secondary,'',!g.canKickRandomly(),'🎲'),
+    button(g,'withdraw','انسحاب',ButtonStyle.Secondary,'',false,'👋'),
     button(g,'reveal','كشف',ButtonStyle.Secondary,'',false,'🔎'),
-    button(g,'random-kick','طرد عشوائي',ButtonStyle.Primary,'',!g.canKickRandomly(),'🎲'),
   ];
   const p=g.store.get(g.guild,g.actor);
-  if(p.nuke>0)controls.push(button(g,'nuke','قنبلة نووية',ButtonStyle.Danger,'',false,'☢️'));
+  if(p.nuke>0)controls.push(button(g,'nuke','قنبلة نووية',ButtonStyle.Secondary,'',false,'☢️'));
   return rows(controls);
 }
 export function shopPayload(g,user){
@@ -66,14 +66,25 @@ export function shopPayload(g,user){
   return {embeds:[embed],components:rows(Object.entries(ITEMS).map(([key,item])=>button(g,'buy',`${item.name} • ${item.price}`,ButtonStyle.Primary,key)))};
 }
 export async function gamePayload(g){
+  if(g.phase==='turn'){
+    const filename='roulette.png';
+    const callout=new TextDisplayBuilder().setContent(`> • ${mention(g.actor)}`);
+    const wheel=new MediaGalleryBuilder().addItems(item=>item.setURL(`attachment://${filename}`).setDescription('عجلة الروليت بأسماء المتبقين'));
+    return {
+      flags:MessageFlags.IsComponentsV2,
+      components:[callout,wheel],
+      attachments:[],files:attachments(await rouletteCard(g),filename),
+      allowedMentions:{parse:[],users:[g.actor]},
+    };
+  }
   const embed=new EmbedBuilder().setColor(purple);
   let description='',files=[],content=null;
   if(g.phase==='lobby'){
     content=lobbyContent(g);
     if(!lobbyCache.has(g.type))lobbyCache.set(g.type,lobbyCard(g.type));
     files=attachments(await lobbyCache.get(g.type),'lobby.png');
-  }else if(g.phase==='turn'||g.phase==='reverse'){
-    content=g.phase==='turn'?`> 🎯 ${mention(g.actor)} اختر لاعبًا لطرده ${until(g)}.`:`> 🎲 اختارت الروليت ${mention(g.actor)}. سيتم طرده ${until(g)}.`;
+  }else if(g.phase==='reverse'){
+    content=`> 🎲 اختارت الروليت ${mention(g.actor)}. سيتم طرده ${until(g)}.`;
     files=attachments(await rouletteCard(g),'roulette.png');embed.setTitle(GAME_NAMES[g.type]).setImage('attachment://roulette.png');
   }else if(g.phase==='hiding'){
     const hidden=g.alive().filter(p=>p.spot!==null).length;
@@ -89,24 +100,38 @@ export async function gamePayload(g){
     const actor=g.player(g.actor);if(actor.avatar)embed.setThumbnail(actor.avatar);
   }
   if(description)embed.setDescription(description);
-  if(g.phase==='turn'||g.phase==='reverse')embed.setFooter({text:footer(g)});
-  const hasEmbed=Boolean(description)||g.phase==='turn'||g.phase==='reverse';
+  if(g.phase==='reverse')embed.setFooter({text:footer(g)});
+  const hasEmbed=Boolean(description)||g.phase==='reverse';
   return {content,embeds:hasEmbed?[embed]:[],attachments:[],files,allowedMentions:{parse:[],users:g.actor?[g.actor]:[]}};
 }
 export function resultsPayload(g,results){
   const grouped=new Map();
   for(const result of results){
-    const key=JSON.stringify([result.bomb,result.withdrawn,result.reason]);
+    const key=JSON.stringify([result.bomb,result.withdrawn,result.reason,result.roulette]);
     if(!grouped.has(key))grouped.set(key,[]);
     grouped.get(key).push(result);
   }
   const lines=[];
-  const users=results.map(result=>result.id);
+  const users=[];
   for(const group of grouped.values()){
     const first=group[0];
     const targets=group.map(result=>mention(result.id)).join('، ');
     const player=group.length===1?'اللاعب':'اللاعبين';
-    if(first.bomb)lines.push(`💥 **بوم!** تم تفجير ${targets} وطرده من القيم.`);
+    const event=first.roulette;
+    if(event?.kind==='nuke'){
+      lines.push(`**قنبلة نووية!!** تم تفعيل الخاصية من قبل ${mention(event.actor)} وطرد جميع اللاعبين ☢️.`);
+      users.push(event.actor);
+      continue;
+    }
+    users.push(...group.map(result=>result.id));
+    if(event?.kind==='reflect'){
+      lines.push(`**هجمة مرتدة!!** محاولة لطرد ${mention(event.target)}، تم تفعيل الخاصية وطرد ${targets} 💥.`);
+      users.push(event.target);
+    }else if(event){
+      const random=event.kind==='random'?' عشوائيًا':'';
+      const next=g.alive().length>1?'، سوف تبدأ الجولة القادمة قريباً ⏰':'';
+      lines.push(`تم طرد ${targets}${random}${next}`);
+    }else if(first.bomb)lines.push(`💥 **بوم!** تم تفجير ${targets} وطرده من القيم.`);
     else if(first.withdrawn)lines.push(`انسحب ${player} ${targets}.`);
     else lines.push(`تم طرد ${player} ${targets}${first.reason?' '+first.reason:''}`);
     if(first.survivor&&g.alive().length>1){
