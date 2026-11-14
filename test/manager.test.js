@@ -4,7 +4,7 @@ import { GameManager,SerialQueue } from '../src/manager.js';
 import { Store } from '../src/store.js';
 import { gameComponents,controlComponents,shopPayload,gamePayload,winPayload } from '../src/views.js';
 import { commands } from '../src/commands.js';
-import { ComponentType, MessageFlags, MessagePayload } from 'discord.js';
+import { ButtonStyle, ComponentType, MessageFlags, MessagePayload } from 'discord.js';
 
 function setup(t,{roundGapMs=0,payload=async()=>({})}={}){
   const store=new Store(':memory:');let time=1000000;
@@ -66,6 +66,7 @@ test('50-player roulette splits components into legal messages; all player IDs a
 test('shop has latest correct prices and serializable command definitions',async t=>{
   const {manager,channel,click}=setup(t),e=await manager.start(channel,'roulette','host');await click(e,'1','join');
   const shop=shopPayload(e.game,'1');const fields=shop.embeds[0].toJSON().fields;
+  assert.ok(shop.components[0].toJSON().components.every(button=>button.style===ButtonStyle.Secondary));
   assert.ok(fields[0].name.includes('2'));assert.ok(fields[1].name.includes('1'));assert.ok(fields[2].name.includes('10'));
   assert.ok(commands.find(c=>c.name==='اضافة').default_member_permissions);assert.equal(commands.find(c=>c.name==='اضافة').options[0].name,'نقاط');
 });
@@ -291,6 +292,7 @@ test('all registration messages use a native image attachment and only the parti
     assert.equal(e.main.payload.content,'المشتركين: **0**');
     assert.deepEqual(e.main.payload.embeds,[]);
     assert.equal(e.main.payload.files[0].name,'lobby.png');
+    assert.ok(e.main.payload.components[0].toJSON().components.every(button=>button.style===ButtonStyle.Secondary));
     await click(e,'1','join');
     await manager.sync(e);
     assert.equal(e.main.payload.content,'المشتركين: **1**');

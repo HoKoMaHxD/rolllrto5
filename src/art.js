@@ -1,6 +1,7 @@
 import { createCanvas, GlobalFonts, loadImage } from '@napi-rs/canvas';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { ROOT, GAME_NAMES } from './config.js';
 
 GlobalFonts.registerFromPath(path.join(ROOT,'assets/fonts/NotoKufiArabic-Bold.ttf'),'ArenaArabic');
@@ -42,36 +43,17 @@ async function avatar(url) {
     }catch{return null;}
   })();avatarCache.set(url,p);if(avatarCache.size>200)avatarCache.delete(avatarCache.keys().next().value);return p;
 }
-async function portrait(ctx,p,x,y,r,border=null) {
+async function portrait(ctx,p,x,y,r,border=purple) {
   ctx.save();ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.clip();
   const img=await avatar(p.avatar);
   if(img){const s=Math.min(img.width,img.height);ctx.drawImage(img,(img.width-s)/2,(img.height-s)/2,s,s,x-r,y-r,r*2,r*2);}
-  else{const g=ctx.createLinearGradient(x-r,y-r,x+r,y+r);g.addColorStop(0,border?'#403a34':'#73459b');g.addColorStop(1,border?'#191613':'#2f1d4b');ctx.fillStyle=g;ctx.fillRect(x-r,y-r,r*2,r*2);text(ctx,Array.from(clean(p.name)).slice(0,2).join(''),x,y,r*.7,white,r*1.6);}
+  else{const g=ctx.createLinearGradient(x-r,y-r,x+r,y+r);g.addColorStop(0,'#73459b');g.addColorStop(1,'#2f1d4b');ctx.fillStyle=g;ctx.fillRect(x-r,y-r,r*2,r*2);text(ctx,Array.from(clean(p.name)).slice(0,2).join(''),x,y,r*.7,white,r*1.6);}
   ctx.restore();
-  const rim=ctx.createLinearGradient(x-r,y+r,x+r,y-r);
-  rim.addColorStop(0,'#201824');rim.addColorStop(.35,'#41284c');rim.addColorStop(.55,'#9e61b7');rim.addColorStop(.7,'#e6b3f4');rim.addColorStop(1,'#45274e');
-  ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.strokeStyle=border||rim;ctx.lineWidth=border?2:4;ctx.stroke();
-}
-const templates=new Map();
-function template(name) {
-  if(!templates.has(name))templates.set(name,loadImage(path.join(ROOT,'assets/cards',`${name}.png`)));
-  return templates.get(name);
+  ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.strokeStyle=border;ctx.lineWidth=5;ctx.stroke();
 }
 
-export async function lobbyCard(type) {
-  const card=type==='roulette'?'roulette-lobby':type==='reverse'?'roulette':type;
-  const source=await template(card);
-  const canvas=createCanvas(source.width*2,source.height*2);
-  const ctx=canvas.getContext('2d');
-  ctx.scale(2,2);
-  ctx.drawImage(source,0,0);
-  if(type==='reverse'){
-    ctx.fillStyle='#1a191e';
-    ctx.fillRect(19,10,100,43);
-    text(ctx,'روليت',65,18,25,white,97);
-    text(ctx,'عكسي',65,43,19,white,97);
-  }
-  return canvas.toBuffer('image/png');
+export function lobbyCard(type) {
+  return readFile(path.join(ROOT,'assets/cards',`${type}-lobby.png`));
 }
 export async function rouletteCard(game) {
   if(game.type==='roulette')return regularRouletteWheel(game);
@@ -104,66 +86,125 @@ export async function rouletteCard(game) {
 }
 
 async function regularRouletteWheel(game) {
-  const size=408;
+  const size=600;
   const canvas=createCanvas(size,size);
   const ctx=canvas.getContext('2d');
   const center=size/2;
-  const radius=196;
+  const radius=262;
   const players=game.alive();
   const slice=2*Math.PI/players.length;
   const selected=players.findIndex(player=>player.id===game.actor);
   const offset=-(selected+.5)*slice;
+  const labelSize=Math.max(15,Math.min(23,Math.round(slice*103)));
 
   ctx.save();
   ctx.translate(center,center);
+  const metal=ctx.createLinearGradient(-225,-240,235,245);
+  metal.addColorStop(0,'#5c437c');
+  metal.addColorStop(.18,'#ddc6f1');
+  metal.addColorStop(.39,'#7f55a6');
+  metal.addColorStop(.61,'#2b1647');
+  metal.addColorStop(.82,'#a779c9');
+  metal.addColorStop(1,'#35204d');
+  wheelDisc(ctx,289,'#120d1b');
+  wheelDisc(ctx,284,metal);
+  wheelDisc(ctx,279,'#1c102a');
+  wheelDisc(ctx,269,'#0b0713');
+
+  const palettes=[
+    {stops:['#9d7bbd','#c6ace0','#e7daf3'],ink:'#29163c'},
+    {stops:['#2c194b','#483070','#59357f'],ink:'#fbf3ff'},
+  ];
+  const active={stops:['#532b78','#71339c','#984ec2'],ink:'#ffffff'};
+  for(const palette of [...palettes,active]){
+    const fill=ctx.createRadialGradient(0,0,70,0,0,radius);
+    palette.stops.forEach((color,i)=>fill.addColorStop(i/2,color));
+    palette.fill=fill;
+  }
   for(const [index,player] of players.entries()){
     const start=offset+index*slice;
     const angle=start+slice/2;
+    const palette=index===selected?active:palettes[index%2];
     ctx.beginPath();
     ctx.moveTo(0,0);
     ctx.arc(0,0,radius,start,start+slice);
     ctx.closePath();
-    ctx.fillStyle=index%2?'#897156':'#e5dcc4';
+    ctx.fillStyle=palette.fill;
     ctx.fill();
-    ctx.lineWidth=3.4;
-    ctx.strokeStyle='#10100e';
+    ctx.lineWidth=players.length>32?1.5:2.7;
+    ctx.strokeStyle='#1b0e29';
     ctx.stroke();
 
     ctx.save();
-    const radialDistance=127;
+    ctx.clip();
+    const radialDistance=175;
     ctx.translate(Math.cos(angle)*radialDistance,Math.sin(angle)*radialDistance);
     ctx.rotate(angle+(Math.cos(angle)<0?Math.PI:0));
-    // Scale the text to stay inside narrow wedges without dropping player names.
-    const wedgeScale=Math.min(1,slice*3.9);
-    ctx.scale(1,wedgeScale);
-    text(ctx,player.name,0,0,players.length>28?13:14,'#15120f',119);
+    ctx.scale(1,Math.min(1,slice*7));
+    text(ctx,player.name,0,0,labelSize,palette.ink,146);
     ctx.restore();
   }
+
+  // An inset outline and regular highlights give the rim a metal edge.
   ctx.beginPath();
   ctx.arc(0,0,radius,0,Math.PI*2);
-  ctx.strokeStyle='#0b0b0a';
-  ctx.lineWidth=4;
+  ctx.strokeStyle='#b08acb';
+  ctx.lineWidth=2;
   ctx.stroke();
+  for(let i=0;i<12;i++){
+    const angle=i*Math.PI/6;
+    ctx.beginPath();
+    ctx.arc(274*Math.cos(angle),274*Math.sin(angle),2.35,0,Math.PI*2);
+    ctx.fillStyle=i%3===0?'#f8ebff':'#c397eb';
+    ctx.fill();
+  }
+  wheelDisc(ctx,84,'#190d25');
+  wheelDisc(ctx,80,metal);
+  wheelDisc(ctx,72,'#170e20');
   ctx.beginPath();
-  ctx.moveTo(42,-14);
-  ctx.lineTo(64,0);
-  ctx.lineTo(42,14);
+  ctx.moveTo(73,-14);
+  ctx.lineTo(93,-2);
+  ctx.quadraticCurveTo(96,0,93,2);
+  ctx.lineTo(73,14);
   ctx.closePath();
-  ctx.fillStyle='#eee9dc';
+  ctx.fillStyle='#f0d9ff';
   ctx.fill();
   ctx.restore();
 
-  await portrait(ctx,players[selected],center,center,50,'#eee9dc');
+  await portrait(ctx,players[selected],center,center,69,'#e9ccff');
   return canvas.toBuffer('image/png');
 }
+
+function wheelDisc(ctx,radius,fill) {
+  ctx.beginPath();
+  ctx.arc(0,0,radius,0,Math.PI*2);
+  ctx.fillStyle=fill;
+  ctx.fill();
+}
+
 export async function winnerCard(player,stats) {
-  const source=await template('winner');
-  const canvas=createCanvas(source.width*2,source.height*2);
-  const ctx=canvas.getContext('2d');
-  ctx.scale(2,2);
-  ctx.drawImage(source,0,0);
-  await portrait(ctx,player,375,150,98);
-  text(ctx,player.name,374,329,20,'#f7f5fa',214);
-  text(ctx,`نقاط الألعاب: ${stats.points}  |  الفوزات: ${stats.wins}`,683,425,19,'#f2eff5',635,'right');
+  const {canvas,ctx}=await base(1200,960);
+  text(ctx,'ARENA GAMES',600,49,22,'#9e85b3',900);
+
+  ctx.save();
+  ctx.translate(750,133);
+  ctx.rotate(.27);
+  const crown=ctx.createLinearGradient(-80,-90,80,30);
+  crown.addColorStop(0,'#6d388b');
+  crown.addColorStop(1,'#ecc5ff');
+  ctx.fillStyle=crown;
+  ctx.beginPath();
+  ctx.moveTo(-77,24);
+  for(const [x,y] of [[-95,-66],[-43,-36],[0,-100],[43,-36],[95,-66],[77,24]])ctx.lineTo(x,y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+
+  await portrait(ctx,player,600,330,177);
+  text(ctx,'فوز مستحق !!',600,575,42,'#d3a2ef',1000);
+  box(ctx,300,629,600,73,21,'#100c15','#a46cc7');
+  text(ctx,player.name,600,668,39,white,555);
+  box(ctx,40,782,1120,126,32,'#242329','#3c3645');
+  text(ctx,`نقاط الألعاب: ${stats.points}  |  الفوزات: ${stats.wins}`,600,846,36,white,1040);
   return canvas.toBuffer('image/png');
 }

@@ -22,7 +22,7 @@ export function gameComponents(g,{phase=g.phase,locked=false,eyes={}}={}){
   const closedEye=eyes.closed||process.env.HIDDEN_EMOJI_ID||'😌';
   let buttons=[];
   if(phase==='lobby'){
-    buttons=[button(g,'join','دخول',ButtonStyle.Success,'',false,'➕'),button(g,'leave','خروج',ButtonStyle.Danger,'',false,'➖')];
+    buttons=[button(g,'join','دخول',ButtonStyle.Secondary,'',false,'➕'),button(g,'leave','خروج',ButtonStyle.Secondary,'',false,'➖')];
     if(g.type==='roulette')buttons.push(button(g,'shop','المتجر',ButtonStyle.Secondary,'',false,'🛒'));
   } else if(phase==='turn') buttons=g.alive().filter(p=>p.id!==g.actor).map(p=>button(g,'kick',`${p.number}  ${p.name}`.slice(0,70),ButtonStyle.Secondary,p.id));
   else if(phase==='hiding'||phase==='seeking'){
@@ -63,7 +63,7 @@ export function shopPayload(g,user){
   const embed=new EmbedBuilder().setColor(purple).setTitle('🛒 متجر الروليت')
     .setDescription(`رصيدك: **${p.points}** نقطة\nالأغراض تبقى معك حتى استخدامها، داخل هذا السيرفر.\nالشراء متاح للمشاركين أثناء التسجيل فقط.`)
     .addFields(Object.entries(ITEMS).map(([key,item])=>({name:`${item.emoji} ${item.name} — ${item.price} نقطة`,value:`تملك: **${p[key]}**\n${key==='reflect'?'تعكس طردًا واحدًا على المهاجم. لا تحمي من المهلة أو النووي.':key==='reveal'?'يكشف لك وحدك حاملي المرتدة الحاليين، مرة واحدة أثناء دورك.':'استخدمها أثناء دورك لإنهاء القيم والفوز.'}`})));
-  return {embeds:[embed],components:rows(Object.entries(ITEMS).map(([key,item])=>button(g,'buy',`${item.name} • ${item.price}`,ButtonStyle.Primary,key)))};
+  return {embeds:[embed],components:rows(Object.entries(ITEMS).map(([key,item])=>button(g,'buy',`${item.name} • ${item.price}`,ButtonStyle.Secondary,key)))};
 }
 export async function gamePayload(g){
   if(g.phase==='turn'){

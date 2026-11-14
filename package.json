@@ -1,6 +1,6 @@
 {
   "name": "arena-party-games",
-  "version": "4.0.0",
+  "version": "5.0.0",
   "private": true,
   "type": "module",
   "description": "Arabic Discord party games: roulette, hide, mines, chairs and reverse roulette",
