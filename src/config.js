@@ -14,7 +14,6 @@ export const config = {
   admins: csv('ADMIN_IDS'),
   channels: csv('GAME_CHANNEL_IDS'),
   roleId: process.env.GAME_ROLE_ID || null,
-  name: process.env.BOT_NAME || 'Arena Games',
   dataDir: path.resolve(process.env.DATA_DIR || path.join(ROOT, 'data')),
   maxPlayers: integer('MAX_PLAYERS', 50, 2, 50),
   lobbyMs: integer('LOBBY_SECONDS', 20, 5, 120) * 1000,

@@ -2,20 +2,22 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { GameManager,SerialQueue } from '../src/manager.js';
 import { Store } from '../src/store.js';
-import { gameComponents,controlComponents,shopPayload } from '../src/views.js';
+import { gameComponents,controlComponents,shopPayload,gamePayload,winPayload } from '../src/views.js';
 import { commands } from '../src/commands.js';
 
-function setup(t){
+function setup(t,{roundGapMs=0,payload=async()=>({})}={}){
   const store=new Store(':memory:');let time=1000000;
-  const config={name:'Test',maxPlayers:50,lobbyMs:20000,turnMs:20000,hideMs:20000,chairMs:10000,reverseMs:4000};
+  const config={name:'Test',maxPlayers:50,lobbyMs:20000,turnMs:20000,hideMs:20000,chairMs:10000,reverseMs:4000,roundGapMs};
   const sent=[];
   const channel={id:'c',guild:{id:'g'},async send(payload){
     const msg={id:String(sent.length+1),payload,async edit(p){this.payload={...this.payload,...p};return this;}};sent.push(msg);return msg;
   }};
-  const manager=new GameManager(store,config,{now:()=>time,payload:async g=>({components:gameComponents(g).slice(0,5)}),winner:async(g,stats)=>({content:g.winner?`winner:${g.winner}:${stats.wins}`:'no winner'})});
+  const manager=new GameManager(store,config,{now:()=>time,payload,winner:async(g,stats)=>({content:g.winner?`winner:${g.winner}:${stats.wins}`:'no winner'})});
   t.after(()=>{for(const e of manager.games.values()){clearTimeout(e.timer);clearTimeout(e.repaint);}store.close();});
-  const click=(e,user,action,value='',version=e.game.version)=>manager.click({channelId:'c',guildId:'g',id:e.game.id,version,action,value,user:{id:user,name:user},receivedAt:time,respond:async payload=>payload});
-  return {manager,channel,store,sent,click,advance:ms=>{time+=ms;}};
+  const replies=[];
+  const click=(e,user,action,value='',version=e.game.version)=>manager.click({channelId:'c',guildId:'g',id:e.game.id,version,action,value,user:{id:user,name:user},receivedAt:time,respond:async payload=>{replies.push(payload);}});
+  const expire=async e=>{time=e.game.deadline;assert.ok(e.game.timeout(e.game.version));await manager.sync(e);};
+  return {manager,channel,store,sent,click,replies,expire,time:()=>time,advance:ms=>{time+=ms;}};
 }
 test('serial queue preserves ordering across errors without blocking another channel',async()=>{
   const q=new SerialQueue(),order=[];
@@ -60,9 +62,9 @@ test('shop has latest correct prices and serializable command definitions',async
   assert.ok(fields[0].name.includes('2'));assert.ok(fields[1].name.includes('1'));assert.ok(fields[2].name.includes('10'));
   assert.ok(commands.find(c=>c.name==='اضافة').default_member_permissions);assert.equal(commands.find(c=>c.name==='اضافة').options[0].name,'نقاط');
 });
-test('hide board has 25 squares and an independent withdrawal control message',async t=>{
+test('hide board has 25 squares and no withdrawal control',async t=>{
   const {manager,channel,click}=setup(t),e=await manager.start(channel,'hide','host');await click(e,'1','join');await click(e,'2','join');e.game.start();await manager.sync(e);
-  assert.equal(e.main.payload.components.length,5);assert.equal(controlComponents(e.game).length,1);
+  assert.equal(e.main.payload.components.length,5);assert.equal(controlComponents(e.game).length,0);assert.equal(e.controls,null);
   assert.equal(e.main.payload.components.flatMap(r=>r.toJSON().components).length,25);
 });
 test('winner is rewarded once; finished game is released and buttons disabled',async t=>{
@@ -81,4 +83,216 @@ test('restart recovery clears stale components and keeps inventory and points',a
   clearTimeout(e.timer);clearTimeout(e.repaint);manager.games.clear();channel.isTextBased=()=>true;channel.messages={fetch:async id=>sent.find(m=>m.id===id)};
   await manager.recover({channels:{fetch:async()=>channel}});assert.deepEqual(e.main.payload.components,[]);assert.equal(store.get('g','1').points,3);assert.equal(store.get('g','1').reflect,1);
   assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM active_messages').get().n,0);
+});
+
+test('both roulette modes announce the victim publicly, close the turn, and post a new message after five seconds',async t=>{
+  for(const type of ['roulette','reverse']){
+    const {manager,channel,click,replies,sent,expire,time}=setup(t,{roundGapMs:5000,payload:gamePayload});
+    const e=await manager.start(channel,type,'host');
+    for(const id of ['1','2','3'])await click(e,id,'join');
+    await expire(e);
+    const oldPanel=e.main;
+    const target=type==='reverse'?e.game.actor:e.game.alive().find(p=>p.id!==e.game.actor).id;
+    const replyCount=replies.length;
+    if(type==='reverse')await expire(e);
+    else await click(e,e.game.actor,'kick',target);
+    assert.equal(replies.length,replyCount);
+    assert.equal(e.game.deadline-time(),5000);
+    assert.deepEqual(oldPanel.payload.components,[]);
+    assert.equal(sent.at(-1).payload.content,`تم طرد اللاعب <@${target}>`);
+    assert.deepEqual(sent.at(-1).payload.allowedMentions.users,[target]);
+    assert.equal(e.main,null);
+    await expire(e);
+    assert.notEqual(e.main.id,oldPanel.id);
+  }
+});
+
+test('chairs edits the ready message into green/red and announces eliminations before next ready message',async t=>{
+  const {manager,channel,click,replies,sent,expire,time}=setup(t,{roundGapMs:5000,payload:gamePayload});
+  const e=await manager.start(channel,'chairs','host');
+  for(const id of ['1','2','3','4'])await click(e,id,'join');
+  let roll=0;e.game.rng=()=>roll;
+  await expire(e);
+  const ready=e.main;
+  assert.match(ready.payload.content,/خلك جاهز/);
+  assert.equal(e.game.deadline-time(),5000);
+  assert.ok(ready.payload.components[0].toJSON().components.every(b=>b.disabled));
+  await expire(e);
+  assert.equal(e.main.id,ready.id);
+  assert.match(e.main.payload.content,/لا تحجز/);
+  const replyCount=replies.length;
+  await click(e,'1','chair','0');
+  assert.equal(replies.length,replyCount);
+  await expire(e);
+  assert.match(sent.at(-2).payload.content,/تم طرد اللاعب <@1>/);
+  assert.notEqual(e.main.id,ready.id);
+  assert.match(e.main.payload.content,/خلك جاهز/);
+  const next=e.main.id;
+  roll=99;await expire(e);
+  assert.equal(e.main.id,next);
+  assert.match(e.main.payload.content,/🟢 \*\*احجز/);
+});
+
+test('mines archives 3x3 boards with the picked eye/bomb and announces the promoted player',async t=>{
+  const {manager,channel,click,replies,sent,expire,time}=setup(t,{roundGapMs:5000,payload:gamePayload});
+  const e=await manager.start(channel,'mines','host');
+  for(const id of ['1','2','3'])await click(e,id,'join');
+  e.game.rng=()=>0;await expire(e);
+  const first=e.main;
+  const firstActor=e.game.actor;
+  assert.deepEqual(first.payload.components.slice(0,3).map(row=>row.toJSON().components.length),[3,3,3]);
+  assert.equal(first.payload.components[0].toJSON().components[0].emoji,undefined);
+  const replyCount=replies.length;
+  const messageCount=sent.length;
+  await click(e,firstActor,'mine','9');
+  const safe=first.payload.components[2].toJSON().components[2];
+  assert.equal(safe.style,3);assert.equal(safe.emoji.name,'👁️');assert.ok(safe.disabled);
+  assert.equal(sent.length,messageCount);
+  assert.equal(e.game.deadline-time(),5000);
+  await expire(e);
+  const second=e.main,secondActor=e.game.actor;
+  assert.notEqual(second.id,first.id);
+  await click(e,secondActor,'mine','1');
+  const bomb=second.payload.components[0].toJSON().components[0];
+  assert.equal(bomb.style,4);assert.equal(bomb.emoji.name,'💣');assert.ok(bomb.disabled);
+  assert.match(sent.at(-1).payload.content,new RegExp(`بوم.*تم تفجير <@${secondActor}>`));
+  assert.match(sent.at(-1).payload.content,new RegExp(`تأهل <@${firstActor}>`));
+  assert.equal(replies.length,replyCount);
+  await expire(e);
+  assert.ok(e.game.duel.includes(firstActor));
+});
+
+test('hide swaps a closed eye for an open eye without privately replying to a reveal',async t=>{
+  const {manager,channel,click,replies,sent,expire}=setup(t,{roundGapMs:5000});
+  manager.eyes={closed:'123456789012345678',open:'223456789012345678'};
+  const e=await manager.start(channel,'hide','host');
+  for(const id of ['1','2','3'])await click(e,id,'join');
+  await expire(e);
+  for(const id of ['1','2','3'])await click(e,id,'hide',id);
+  await expire(e);
+  const board=e.main;
+  assert.equal(board.payload.components[0].toJSON().components[0].emoji.id,manager.eyes.closed);
+  const replyCount=replies.length;
+  await click(e,e.game.actor,'seek','1');
+  const opened=board.payload.components[0].toJSON().components[0];
+  assert.equal(opened.emoji.id,manager.eyes.open);
+  assert.ok(opened.disabled);
+  assert.equal(replies.length,replyCount);
+  assert.match(sent.at(-1).payload.content,/تم طرد اللاعب <@1>/);
+  await expire(e);
+  assert.equal(e.main.id,board.id);
+  assert.equal(e.main.payload.components[0].toJSON().components[1].disabled,false);
+});
+
+test('win message contains only trophy, mention, congratulations, and award image',async()=>{
+  const payload=await winPayload({winner:'1',player:()=>({id:'1',name:'Player'})},{wins:6,points:10});
+  assert.equal(payload.content,'🏆 <@1> فوز مستحق!');
+  assert.deepEqual(payload.embeds,[]);
+  assert.equal(payload.files.length,1);
+  assert.equal(payload.files[0].name,'winner.png');
+  assert.deepEqual(payload.allowedMentions.users,['1']);
+});
+
+test('every game confirms lobby entry and exit with the exact short text',async t=>{
+  for(const type of ['roulette','reverse','hide','chairs','mines']){
+    const {manager,channel,click,replies}=setup(t);
+    const e=await manager.start(channel,type,'host');
+    await click(e,'1','join');
+    await click(e,'1','leave');
+    assert.deepEqual(replies.map(reply=>reply.content),['تم الدخول','تم الخروج']);
+    assert.equal(e.game.players.length,0);
+  }
+});
+
+test('withdraw is available only in regular roulette, and lobby exit cannot eliminate anyone',async t=>{
+  for(const type of ['roulette','reverse','hide','chairs','mines']){
+    const {manager,channel,click,expire}=setup(t);
+    const e=await manager.start(channel,type,'host');
+    for(const id of ['1','2','3'])await click(e,id,'join');
+    await expire(e);
+    const buttons=controlComponents(e.game).flatMap(row=>row.toJSON().components);
+    const hasWithdraw=buttons.some(button=>button.label==='انسحاب');
+    assert.equal(hasWithdraw,type==='roulette');
+    await assert.rejects(()=>click(e,'1','leave'),/انتهى التسجيل/);
+    if(type==='roulette'){
+      await click(e,'1','withdraw');
+      assert.equal(e.game.player('1').alive,false);
+    }else{
+      await assert.rejects(()=>click(e,'1','withdraw'),/الروليت العادي فقط/);
+      assert.equal(e.game.player('1').alive,true);
+    }
+  }
+});
+
+test('random roulette kick is silent, excludes the actor, and disables at exactly nine players',async t=>{
+  const {manager,channel,click,replies,sent,expire}=setup(t,{roundGapMs:5000});
+  const e=await manager.start(channel,'roulette','host');
+  for(let n=1;n<=10;n++)await click(e,String(n),'join');
+  e.game.rng=()=>0;
+  await expire(e);
+  const randomButton=()=>controlComponents(e.game)[0].toJSON().components.find(button=>button.label==='طرد عشوائي');
+  const actor=e.game.actor;
+  const target=e.game.alive().find(player=>player.id!==actor).id;
+  assert.equal(randomButton().disabled,false);
+  await assert.rejects(()=>click(e,target,'random-kick'),/هذا ليس دورك/);
+  const replyCount=replies.length;
+  await click(e,actor,'random-kick');
+  assert.ok(e.game.player(actor).alive);
+  assert.equal(e.game.player(target).alive,false);
+  assert.equal(replies.length,replyCount);
+  assert.equal(sent.at(-1).payload.content,`تم طرد اللاعب <@${target}>`);
+  await expire(e);
+  assert.equal(e.game.alive().length,9);
+  assert.equal(randomButton().disabled,true);
+  await assert.rejects(()=>click(e,e.game.actor,'random-kick'),/9 لاعبين/);
+  const manualTarget=e.game.alive().find(player=>player.id!==e.game.actor).id;
+  await click(e,e.game.actor,'kick',manualTarget);
+  assert.equal(e.game.player(manualTarget).alive,false);
+  assert.equal(replies.length,replyCount);
+});
+
+test('random kick uses the same reflection as a chosen target',async t=>{
+  const {manager,channel,click,store,expire,sent}=setup(t);
+  const e=await manager.start(channel,'roulette','host');
+  for(let n=1;n<=10;n++)await click(e,String(n),'join');
+  e.game.rng=()=>0;
+  await expire(e);
+  const actor=e.game.actor;
+  const target=e.game.alive().find(player=>player.id!==actor).id;
+  store.adjust('g',target,2,'admin');store.buy('g',target,'reflect');
+  await click(e,actor,'random-kick');
+  assert.equal(e.game.player(actor).alive,false);
+  assert.equal(e.game.player(target).alive,true);
+  assert.equal(store.get('g',target).reflect,0);
+  assert.ok(sent.some(message=>message.payload.content?.includes(`تم طرد اللاعب <@${actor}> بسبب مرتدة`)));
+});
+
+test('all registration messages use a native image attachment and only the participant count',async t=>{
+  for(const type of ['roulette','reverse','hide','chairs','mines']){
+    const {manager,channel,click}=setup(t,{payload:gamePayload});
+    const e=await manager.start(channel,type,'host');
+    assert.equal(e.main.payload.content,'المشتركين: **0**');
+    assert.deepEqual(e.main.payload.embeds,[]);
+    assert.equal(e.main.payload.files[0].name,'lobby.png');
+    await click(e,'1','join');
+    await manager.sync(e);
+    assert.equal(e.main.payload.content,'المشتركين: **1**');
+    assert.deepEqual(e.main.payload.embeds,[]);
+  }
+});
+
+test('regular roulette announces registration completion once before the first turn',async t=>{
+  const {manager,channel,click,expire,sent}=setup(t,{payload:gamePayload});
+  const e=await manager.start(channel,'roulette','host');
+  const lobby=e.main;
+  await click(e,'1','join');
+  await click(e,'2','join');
+  await expire(e);
+  assert.equal(lobby.payload.content,'المشتركين: **2**');
+  assert.deepEqual(lobby.payload.components,[]);
+  assert.equal(sent[1].payload.content,'تم الانتهاء من تسجيل جميع اللاعبين');
+  assert.equal(sent[2].id,e.main.id);
+  assert.match(sent[2].payload.content,/اختر لاعبًا لطرده/);
+  await manager.sync(e);
+  assert.equal(sent.filter(message=>message.payload.content==='تم الانتهاء من تسجيل جميع اللاعبين').length,1);
 });

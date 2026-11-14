@@ -47,43 +47,29 @@ async function portrait(ctx,p,x,y,r) {
   const img=await avatar(p.avatar);
   if(img){const s=Math.min(img.width,img.height);ctx.drawImage(img,(img.width-s)/2,(img.height-s)/2,s,s,x-r,y-r,r*2,r*2);}
   else{const g=ctx.createLinearGradient(x-r,y-r,x+r,y+r);g.addColorStop(0,'#73459b');g.addColorStop(1,'#2f1d4b');ctx.fillStyle=g;ctx.fillRect(x-r,y-r,r*2,r*2);text(ctx,Array.from(clean(p.name)).slice(0,2).join(''),x,y,r*.7,white,r*1.6);}
-  ctx.restore();ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.strokeStyle=purple;ctx.lineWidth=5;ctx.stroke();
-}
-function icon(ctx,type,x,y,scale=1) {
-  ctx.save();ctx.translate(x,y);ctx.scale(scale,scale);ctx.shadowColor='#a568d3';ctx.shadowBlur=25;
-  const gradient=ctx.createLinearGradient(-150,-140,150,140);gradient.addColorStop(0,'#dfb9fa');gradient.addColorStop(.35,'#76518c');gradient.addColorStop(1,'#251330');
-  ctx.fillStyle=gradient;ctx.strokeStyle='#e8d4f8';ctx.lineWidth=5;
-  if(type==='roulette'||type==='reverse'){
-    ctx.beginPath();ctx.arc(0,0,145,0,Math.PI*2);ctx.fill();ctx.stroke();ctx.shadowBlur=0;
-    for(let i=0;i<10;i++){ctx.save();ctx.rotate(i*Math.PI/5);ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(0,-138);ctx.strokeStyle=i%2?'#f4e2fc':'#9362b0';ctx.lineWidth=2;ctx.stroke();ctx.restore();}
-    ctx.beginPath();ctx.arc(0,0,38,0,Math.PI*2);ctx.fillStyle='#23152e';ctx.fill();ctx.stroke();
-    text(ctx,type==='reverse'?'↶':'R',0,0,44,purple,70);
-    ctx.beginPath();ctx.moveTo(0,-114);ctx.lineTo(-20,-160);ctx.lineTo(20,-160);ctx.closePath();ctx.fillStyle=white;ctx.fill();
-  } else if(type==='hide'){
-    ctx.beginPath();ctx.ellipse(0,-15,162,38,0,0,Math.PI*2);ctx.fill();ctx.stroke();
-    ctx.beginPath();ctx.moveTo(-103,-25);ctx.lineTo(-88,-135);ctx.quadraticCurveTo(0,-100,88,-135);ctx.lineTo(105,-25);ctx.closePath();ctx.fill();ctx.stroke();
-    box(ctx,-100,-47,200,25,8,'#291537',null);ctx.shadowBlur=0;
-    for(const cx of [-60,60]){ctx.beginPath();ctx.arc(cx,70,49,0,Math.PI*2);ctx.fillStyle='#b286c8';ctx.fill();ctx.strokeStyle='#6b457e';ctx.lineWidth=12;ctx.stroke();}
-    ctx.beginPath();ctx.moveTo(-12,61);ctx.quadraticCurveTo(0,47,12,61);ctx.stroke();
-  } else if(type==='chairs'){
-    box(ctx,-112,-145,224,240,58,'#ede8f1','#ffffff');
-    box(ctx,-120,35,240,84,24,'#bcb5c4','#ffffff');
-    box(ctx,-153,-22,55,151,25,'#f8f4fa','#d6cbdc');box(ctx,98,-22,55,151,25,'#f8f4fa','#d6cbdc');
-    box(ctx,-64,-35,128,105,25,'#b271df','#d6a1fa');
-    ctx.shadowBlur=0;ctx.fillStyle='#797080';ctx.fillRect(-108,126,22,49);ctx.fillRect(87,126,22,49);
-  }else{
-    for(const [yy,rx,ry,c] of [[63,159,65,'#4f3a60'],[24,153,65,'#bdb4cc'],[-5,142,63,'#634b78'],[-37,111,52,'#e5d9ef']]){ctx.beginPath();ctx.ellipse(0,yy,rx,ry,0,0,Math.PI*2);ctx.fillStyle=c;ctx.fill();ctx.stroke();}
-    ctx.beginPath();ctx.ellipse(0,-56,64,29,0,0,Math.PI*2);ctx.fillStyle='#c788ef';ctx.fill();ctx.stroke();
-    for(let i=0;i<5;i++){ctx.beginPath();ctx.arc(-105+i*53,68,8,0,Math.PI*2);ctx.fillStyle='#cb82fa';ctx.fill();}
-  }
   ctx.restore();
+  const rim=ctx.createLinearGradient(x-r,y+r,x+r,y-r);
+  rim.addColorStop(0,'#201824');rim.addColorStop(.35,'#41284c');rim.addColorStop(.55,'#9e61b7');rim.addColorStop(.7,'#e6b3f4');rim.addColorStop(1,'#45274e');
+  ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.strokeStyle=rim;ctx.lineWidth=4;ctx.stroke();
 }
-export async function lobbyCard(type,brand='Arena Games') {
-  const {canvas,ctx}=await base(1200,700);
-  text(ctx,brand.toUpperCase(),600,52,23,'#9b86ac',800);
-  text(ctx,GAME_NAMES[type],600,150,70,white,1050);
-  icon(ctx,type,600,390,1.02);
-  text(ctx,'ادخل التحدي • آخر لاعب يفوز',600,632,26,'#ddc4ee',950);
+const templates=new Map();
+function template(name) {
+  if(!templates.has(name))templates.set(name,loadImage(path.join(ROOT,'assets/cards',`${name}.png`)));
+  return templates.get(name);
+}
+
+export async function lobbyCard(type) {
+  const source=await template(type==='reverse'?'roulette':type);
+  const canvas=createCanvas(source.width*2,source.height*2);
+  const ctx=canvas.getContext('2d');
+  ctx.scale(2,2);
+  ctx.drawImage(source,0,0);
+  if(type==='reverse'){
+    ctx.fillStyle='#1a191e';
+    ctx.fillRect(19,10,100,43);
+    text(ctx,'روليت',65,18,25,white,97);
+    text(ctx,'عكسي',65,43,19,white,97);
+  }
   return canvas.toBuffer('image/png');
 }
 export async function rouletteCard(game) {
@@ -114,16 +100,14 @@ export async function rouletteCard(game) {
   text(ctx,'الأرقام حسب ترتيب الدخول',1185,height-32,23,'#a995ba',690);
   return canvas.toBuffer('image/png');
 }
-export async function winnerCard(player,stats,brand='Arena Games') {
-  const {canvas,ctx}=await base(1200,960);
-  text(ctx,brand.toUpperCase(),600,49,22,'#9e85b3',900);
-  // Crown above the actual winner's Discord avatar.
-  ctx.save();ctx.translate(750,133);ctx.rotate(.27);const g=ctx.createLinearGradient(-80,-90,80,30);g.addColorStop(0,'#6d388b');g.addColorStop(1,'#ecc5ff');ctx.fillStyle=g;
-  ctx.beginPath();ctx.moveTo(-77,24);ctx.lineTo(-95,-66);ctx.lineTo(-43,-36);ctx.lineTo(0,-100);ctx.lineTo(43,-36);ctx.lineTo(95,-66);ctx.lineTo(77,24);ctx.closePath();ctx.fill();ctx.restore();
-  await portrait(ctx,player,600,330,177);
-  text(ctx,'فوز مستحق !!',600,575,42,'#d3a2ef',1000);
-  box(ctx,300,629,600,73,21,'#100c15','#a46cc7');text(ctx,player.name,600,668,39,white,555);
-  box(ctx,40,782,1120,126,32,'#242329','#3c3645');
-  text(ctx,`نقاط الألعاب: ${stats.points}  |  الفوزات: ${stats.wins}`,600,846,36,white,1040);
+export async function winnerCard(player,stats) {
+  const source=await template('winner');
+  const canvas=createCanvas(source.width*2,source.height*2);
+  const ctx=canvas.getContext('2d');
+  ctx.scale(2,2);
+  ctx.drawImage(source,0,0);
+  await portrait(ctx,player,375,150,98);
+  text(ctx,player.name,374,329,20,'#f7f5fa',214);
+  text(ctx,`نقاط الألعاب: ${stats.points}  |  الفوزات: ${stats.wins}`,683,425,19,'#f2eff5',635,'right');
   return canvas.toBuffer('image/png');
 }

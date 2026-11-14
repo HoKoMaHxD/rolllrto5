@@ -1,44 +1,61 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, AttachmentBuilder } from 'discord.js';
 import { GAME_NAMES, ITEMS } from './config.js';
 import { lobbyCard, rouletteCard, winnerCard } from './art.js';
+import { MINE_SQUARES } from './engine.js';
 
 const purple=0xa76acb;
 export const mention=id=>`<@${id}>`;
-const rows=buttons=>Array.from({length:Math.ceil(buttons.length/5)},(_,i)=>new ActionRowBuilder().addComponents(buttons.slice(i*5,i*5+5)));
+const rows=(buttons,width=5)=>Array.from({length:Math.ceil(buttons.length/width)},(_,i)=>new ActionRowBuilder().addComponents(buttons.slice(i*width,(i+1)*width)));
 const cid=(g,act,value='')=>`ag:${g.id}:${g.version}:${act}:${value}`;
 const button=(g,act,label,style=ButtonStyle.Secondary,value='',disabled=false,emoji=null)=>{
-  const b=new ButtonBuilder().setCustomId(cid(g,act,value)).setLabel(label).setStyle(style).setDisabled(disabled);
+  const b=new ButtonBuilder().setCustomId(cid(g,act,value)).setStyle(style).setDisabled(disabled);
+  if(label)b.setLabel(label);
   if(emoji)b.setEmoji(emoji);return b;
 };
 const footer=g=>`الجولة ${g.round} • المتبقون ${g.alive().length}/${g.players.length}`;
 const until=g=>`<t:${Math.ceil(g.deadline/1000)}:R>`;
 const attachments=(buffer,name)=>[new AttachmentBuilder(buffer,{name})];
 const lobbyCache=new Map();
-export function gameComponents(g){
+export const lobbyContent=g=>`المشتركين: **${g.players.length}**`;
+export function gameComponents(g,{phase=g.phase,locked=false,eyes={}}={}){
+  const openEye=eyes.open||process.env.REVEALED_EMOJI_ID||'👁️';
+  const closedEye=eyes.closed||process.env.HIDDEN_EMOJI_ID||'😌';
   let buttons=[];
-  if(g.phase==='lobby'){
+  if(phase==='lobby'){
     buttons=[button(g,'join','دخول',ButtonStyle.Success,'',false,'➕'),button(g,'leave','خروج',ButtonStyle.Danger,'',false,'➖')];
     if(g.type==='roulette')buttons.push(button(g,'shop','المتجر',ButtonStyle.Secondary,'',false,'🛒'));
-  } else if(g.phase==='turn') buttons=g.alive().filter(p=>p.id!==g.actor).map(p=>button(g,'kick',`${p.number} • ${p.name}`.slice(0,70),ButtonStyle.Secondary,p.id));
-  else if(g.phase==='hiding'||g.phase==='seeking'){
-    const hiding=g.phase==='hiding';
+  } else if(phase==='turn') buttons=g.alive().filter(p=>p.id!==g.actor).map(p=>button(g,'kick',`${p.number} • ${p.name}`.slice(0,70),ButtonStyle.Secondary,p.id));
+  else if(phase==='hiding'||phase==='seeking'){
+    const hiding=phase==='hiding';
     buttons=Array.from({length:25},(_,i)=>{
       const n=i+1,open=!hiding&&g.opened.has(n);
-      const emoji=hiding?null:(open?(process.env.REVEALED_EMOJI_ID||'👁️'):(process.env.HIDDEN_EMOJI_ID||'🙈'));
-      return button(g,hiding?'hide':'seek',String(n),open?ButtonStyle.Success:ButtonStyle.Secondary,String(n),open,emoji);
+      return button(g,hiding?'hide':'seek',hiding?String(n):null,ButtonStyle.Secondary,String(n),locked||open,hiding?null:open?openEye:closedEye);
     });
-  }else if(g.phase==='chairs')buttons=g.seats.map((p,i)=>button(g,'chair',p?'محجوز':String(i+1),g.red?ButtonStyle.Danger:ButtonStyle.Success,String(i),Boolean(p)));
-  else if(g.phase==='duel')buttons=Array.from({length:6},(_,i)=>button(g,'mine',g.picked.has(i+1)?'آمن':String(i+1),g.picked.has(i+1)?ButtonStyle.Success:ButtonStyle.Secondary,String(i+1),g.picked.has(i+1)));
+  }else if(phase==='chair-ready'){
+    buttons=Array.from({length:g.alive().length-1},(_,i)=>button(g,'chair','•',ButtonStyle.Secondary,String(i),true));
+  }else if(phase==='chairs'){
+    buttons=g.seats.map((p,i)=>button(g,'chair',p?'✓':'•',g.red?ButtonStyle.Danger:ButtonStyle.Success,String(i),Boolean(p)||locked));
+  }else if(phase==='duel'){
+    buttons=Array.from({length:MINE_SQUARES},(_,i)=>{
+      const n=i+1;
+      const picked=g.picked.has(n);
+      const bomb=picked&&n===g.bomb;
+      const style=bomb?ButtonStyle.Danger:picked?ButtonStyle.Success:ButtonStyle.Secondary;
+      return button(g,'mine',picked?null:String(n),style,String(n),locked||picked,bomb?'💣':picked?openEye:null);
+    });
+    return rows(buttons,3);
+  }
   return rows(buttons);
 }
 export function controlComponents(g){
-  if(['ended','cancelled','lobby'].includes(g.phase))return [];
-  const controls=[button(g,'withdraw','انسحاب',ButtonStyle.Danger)];
-  if(g.type==='roulette'){
-    controls.push(button(g,'reveal','كشف',ButtonStyle.Secondary,'',false,'🔎'));
-    const p=g.store.get(g.guild,g.actor);
-    if(p.nuke>0)controls.push(button(g,'nuke','قنبلة نووية',ButtonStyle.Danger,'',false,'☢️'));
-  }
+  if(g.type!=='roulette'||g.phase!=='turn')return [];
+  const controls=[
+    button(g,'withdraw','انسحاب',ButtonStyle.Danger),
+    button(g,'reveal','كشف',ButtonStyle.Secondary,'',false,'🔎'),
+    button(g,'random-kick','طرد عشوائي',ButtonStyle.Primary,'',!g.canKickRandomly(),'🎲'),
+  ];
+  const p=g.store.get(g.guild,g.actor);
+  if(p.nuke>0)controls.push(button(g,'nuke','قنبلة نووية',ButtonStyle.Danger,'',false,'☢️'));
   return rows(controls);
 }
 export function shopPayload(g,user){
@@ -48,34 +65,61 @@ export function shopPayload(g,user){
     .addFields(Object.entries(ITEMS).map(([key,item])=>({name:`${item.emoji} ${item.name} — ${item.price} نقطة`,value:`تملك: **${p[key]}**\n${key==='reflect'?'تعكس طردًا واحدًا على المهاجم. لا تحمي من المهلة أو النووي.':key==='reveal'?'يكشف لك وحدك حاملي المرتدة الحاليين، مرة واحدة أثناء دورك.':'استخدمها أثناء دورك لإنهاء القيم والفوز.'}`})));
   return {embeds:[embed],components:rows(Object.entries(ITEMS).map(([key,item])=>button(g,'buy',`${item.name} • ${item.price}`,ButtonStyle.Primary,key)))};
 }
-export async function gamePayload(g,brand){
-  const embed=new EmbedBuilder().setColor(purple).setTitle(GAME_NAMES[g.type]);
-  let description='',files=[];
+export async function gamePayload(g){
+  const embed=new EmbedBuilder().setColor(purple);
+  let description='',files=[],content=null;
   if(g.phase==='lobby'){
-    description=`المشاركين: **${g.players.length}** / ${g.settings.maxPlayers}\nيبدأ القيم ${until(g)}\nاضغط دخول للمشاركة. الأرقام تظهر بعد البداية.`;
-    const key=`${g.type}:${brand}`;if(!lobbyCache.has(key))lobbyCache.set(key,lobbyCard(g.type,brand));
-    files=attachments(await lobbyCache.get(key),'lobby.png');embed.setImage('attachment://lobby.png');
+    content=lobbyContent(g);
+    if(!lobbyCache.has(g.type))lobbyCache.set(g.type,lobbyCard(g.type));
+    files=attachments(await lobbyCache.get(g.type),'lobby.png');
   }else if(g.phase==='turn'||g.phase==='reverse'){
-    description=g.phase==='turn'?`🎯 ${mention(g.actor)} اختر لاعبًا لطرده.\nتنتهي المهلة ${until(g)}؛ عدم الاختيار يخرجك.`:`🎲 اختارت الروليت ${mention(g.actor)}\nسيخرج ${until(g)}.`;
-    files=attachments(await rouletteCard(g),'roulette.png');embed.setImage('attachment://roulette.png');
-  }else if(g.phase==='hiding')description=`🕵️ اختر رقمًا من **1 إلى 25** لتختبئ فيه بسرية.\nينتهي الاختباء ${until(g)}\nاختبأ **${g.alive().filter(p=>p.spot!==null).length}/${g.alive().length}** لاعب.\nيمكن لأكثر من لاعب الاختباء في نفس المربع.`;
-  else if(g.phase==='seeking')description=`🕵️ الدور على ${mention(g.actor)} لكشف مربع.\nتنتهي المهلة ${until(g)}\n🙈 مخفي • 👁️ مفتوح\nكشف مربعك يخرجك وكل من اختبأ معك.`;
+    content=g.phase==='turn'?`> 🎯 ${mention(g.actor)} اختر لاعبًا لطرده ${until(g)}.`:`> 🎲 اختارت الروليت ${mention(g.actor)}. سيتم طرده ${until(g)}.`;
+    files=attachments(await rouletteCard(g),'roulette.png');embed.setTitle(GAME_NAMES[g.type]).setImage('attachment://roulette.png');
+  }else if(g.phase==='hiding'){
+    const hidden=g.alive().filter(p=>p.spot!==null).length;
+    content=`> 🕵️ لديك **${g.duration/1000} ثانية** لاختيار زر للاختباء ${until(g)}.\nاختبأ **${hidden}/${g.alive().length}** لاعب.`;
+  }else if(g.phase==='seeking')content=`> 🕵️ ${mention(g.actor)} لديك **${g.duration/1000} ثانية** لكشف مربع ${until(g)}.`;
+  else if(g.phase==='chair-ready')content=`> ⏰ **خلك جاهز!** الجولة ${g.round+1} تبدأ ${until(g)}.`;
   else if(g.phase==='chairs'){
-    embed.setColor(g.red?0xed4245:0x57f287);
-    description=g.red?`🔴 **لا تضغط!**\nأي لاعب يضغط يخرج. انتظر حتى تنتهي الجولة ${until(g)}.`:`🟢 **اضغط واحجز كرسيك!**\n${g.seats.length} كرسي — ${g.alive().length} لاعب\nمن لا يحجز يخرج. تنتهي الجولة ${until(g)}.`;
+    content=g.red?`> 🔴 **لا تحجز!** الجولة تنتهي ${until(g)}.`:`> 🟢 **احجز!** الجولة تنتهي ${until(g)}.`;
   }else if(g.phase==='duel'){
-    description=`💣 المواجهة: ${g.duel.map(mention).join(' ضد ')}\nالدور على ${mention(g.actor)}\nاختر رقمًا من **1 إلى 6**. لغم واحد فقط!\nتنتهي المهلة ${until(g)}`;
+    content=`> 🎮 الجولة **${g.round}** · الدور على ${mention(g.actor)} ${until(g)}.`;
+    description=`**المواجهة:** ${g.duel.map(mention).join(' ضد ')}`;
+    embed.setColor(0x29282e);
     const actor=g.player(g.actor);if(actor.avatar)embed.setThumbnail(actor.avatar);
-  }else if(g.phase==='ended')description='انتهى القيم.';
-  else description=g.cancelReason;
-  if(g.notes.length&&g.phase!=='lobby')description+=`\n\n${g.notes.join('\n')}`;
-  embed.setDescription(description.slice(0,4096));if(g.started)embed.setFooter({text:footer(g)});
-  return {content:null,embeds:[embed],components:gameComponents(g).slice(0,5),attachments:[],files,allowedMentions:{parse:[],users:g.actor?[g.actor]:[]}};
+  }
+  if(description)embed.setDescription(description);
+  if(g.phase==='turn'||g.phase==='reverse')embed.setFooter({text:footer(g)});
+  const hasEmbed=Boolean(description)||g.phase==='turn'||g.phase==='reverse';
+  return {content,embeds:hasEmbed?[embed]:[],attachments:[],files,allowedMentions:{parse:[],users:g.actor?[g.actor]:[]}};
 }
-export async function winPayload(g,stats,brand){
+export function resultsPayload(g,results){
+  const grouped=new Map();
+  for(const result of results){
+    const key=JSON.stringify([result.bomb,result.withdrawn,result.reason]);
+    if(!grouped.has(key))grouped.set(key,[]);
+    grouped.get(key).push(result);
+  }
+  const lines=[];
+  const users=results.map(result=>result.id);
+  for(const group of grouped.values()){
+    const first=group[0];
+    const targets=group.map(result=>mention(result.id)).join('، ');
+    const player=group.length===1?'اللاعب':'اللاعبين';
+    if(first.bomb)lines.push(`💥 **بوم!** تم تفجير ${targets} وطرده من القيم.`);
+    else if(first.withdrawn)lines.push(`انسحب ${player} ${targets}.`);
+    else lines.push(`تم طرد ${player} ${targets}${first.reason?' '+first.reason:''}`);
+    if(first.survivor&&g.alive().length>1){
+      lines.push(`✅ تأهل ${mention(first.survivor)} للجولة اللي بعدها.`);
+      users.push(first.survivor);
+    }
+  }
+  return {content:lines.join('\n'),allowedMentions:{parse:[],users:[...new Set(users)]}};
+}
+export async function winPayload(g,stats){
   if(!g.winner)return {content:'انتهى القيم بدون فائز؛ خرج جميع اللاعبين.',embeds:[],components:[],allowedMentions:{parse:[]}};
-  const p=g.player(g.winner),file=await winnerCard(p,stats,brand);
-  return {content:`🏆 ${mention(p.id)} فوز مستحق!\nنقاط الألعاب: **${stats.points}** | الفوزات: **${stats.wins}**\n+1 نقطة و+1 فوز`,
-    files:attachments(file,'winner.png'),embeds:[new EmbedBuilder().setColor(purple).setImage('attachment://winner.png')],
+  const p=g.player(g.winner),file=await winnerCard(p,stats);
+  return {content:`🏆 ${mention(p.id)} فوز مستحق!`,
+    embeds:[],files:attachments(file,'winner.png'),
     components:[],allowedMentions:{parse:[],users:[p.id]}};
 }

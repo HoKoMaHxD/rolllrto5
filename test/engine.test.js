@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { Game } from '../src/engine.js';
+import { Game, MINE_SQUARES } from '../src/engine.js';
 import { Store } from '../src/store.js';
 
 function fixture(t,type='roulette',count=4,rng=()=>0){
   const store=new Store(':memory:');t.after(()=>store.close());
-  const game=new Game({type,guild:'g',channel:'c',host:'1',store,rng});
+  const game=new Game({type,guild:'g',channel:'c',host:'1',store,rng,settings:{roundGapMs:0}});
   for(let i=1;i<=count;i++)game.add({id:String(i),name:`Player ${i}`,avatar:null});
   return {game,store};
 }
@@ -48,7 +48,7 @@ test('reveal is private return data, usable only on turn, consumes once and keep
   const {game,store}=fixture(t);buy(store,game,'1','reveal');buy(store,game,'2','reflect');game.start();game.deadline=12345;
   assert.throws(()=>game.reveal('2'));assert.equal(store.get('g','1').reveal,1);
   const version=game.version;assert.deepEqual(game.reveal('1'),['2']);assert.equal(game.version,version);assert.equal(game.deadline,12345);
-  assert.equal(store.get('g','1').reveal,0);assert.throws(()=>game.reveal('1'));assert.deepEqual(game.notes,[]);
+  assert.equal(store.get('g','1').reveal,0);assert.throws(()=>game.reveal('1'));assert.deepEqual(game.results,[]);
 });
 test('nuke wins immediately on owner turn, consumes one, cannot be used off turn',t=>{
   const {game,store}=fixture(t);buy(store,game,'1','nuke');buy(store,game,'2','nuke');game.start();
@@ -94,15 +94,15 @@ test('red chairs eliminate clickers, protect abstainers and next round is green'
   const {game}=fixture(t,'chairs');game.start();assert.equal(game.red,true);game.chair('1',0);assert.equal(game.player('1').alive,false);
   game.timeout(game.version);assert.equal(game.red,false);assert.equal(game.alive().length,3);
 });
-test('mines has six choices and one persistent bomb, alternates turns and advances the survivor',t=>{
+test('mines has nine choices and one persistent bomb, alternates turns and advances the survivor',t=>{
   const {game}=fixture(t,'mines');game.start();assert.equal(game.bomb,1);const first=game.actor,other=game.duel.find(x=>x!==first);
-  assert.throws(()=>game.mine(other,2));assert.throws(()=>game.mine(first,7));game.mine(first,2);assert.equal(game.actor,other);assert.equal(game.bomb,1);
-  assert.throws(()=>game.mine(other,2));game.mine(other,1);assert.equal(game.player(other).alive,false);assert.ok(game.duel.includes(first));assert.equal(game.picked.size,0);
+  assert.throws(()=>game.mine(other,9));assert.throws(()=>game.mine(first,10));game.mine(first,9);assert.equal(game.actor,other);assert.equal(game.bomb,1);
+  assert.throws(()=>game.mine(other,9));game.mine(other,1);assert.equal(game.player(other).alive,false);assert.ok(game.duel.includes(first));assert.equal(game.picked.size,0);
 });
-test('mine timeout and withdrawing duel participant advance the survivor',t=>{
+test('mine timeout advances the survivor and players cannot withdraw from the duel',t=>{
   const {game}=fixture(t,'mines',5);game.start();const actor=game.actor,survivor=game.duel.find(x=>x!==actor);game.timeout(game.version);
   assert.equal(game.player(actor).alive,false);assert.ok(game.duel.includes(survivor));
-  const duel=[...game.duel];game.withdraw(duel[1]);assert.ok(game.duel.includes(duel[0]));
+  const duel=[...game.duel];assert.throws(()=>game.withdraw(duel[1]),/الروليت العادي فقط/);assert.deepEqual(game.duel,duel);
 });
 test('reverse roulette chooses and automatically eliminates until exactly one remains',t=>{
   const {game}=fixture(t,'reverse');game.start();
@@ -130,7 +130,8 @@ for(const type of ['roulette','hide','chairs','mines','reverse'])test(`simulatio
     let steps=0,lastAlive=count;
     while(game.phase!=='ended'&&steps++<1500){
       const v=game.version;
-      if(rng(20)===0)game.withdraw(game.alive()[rng(game.alive().length)].id);
+      if(['intermission','chair-ready'].includes(game.phase))game.timeout(v);
+      else if(type==='roulette'&&rng(20)===0)game.withdraw(game.alive()[rng(game.alive().length)].id);
       else if(rng(10)===0)game.timeout(v);
       else if(game.phase==='hiding'){
         const p=game.alive().find(p=>p.spot===null);game.hide(p.id,1+rng(25));
@@ -139,7 +140,7 @@ for(const type of ['roulette','hide','chairs','mines','reverse'])test(`simulatio
       }else if(game.phase==='turn'){
         const targets=game.alive().filter(p=>p.id!==game.actor);game.kick(game.actor,targets[rng(targets.length)].id);
       }else if(game.phase==='duel'){
-        const choices=Array.from({length:6},(_,i)=>i+1).filter(n=>!game.picked.has(n));game.mine(game.actor,choices[rng(choices.length)]);
+        const choices=Array.from({length:MINE_SQUARES},(_,i)=>i+1).filter(n=>!game.picked.has(n));game.mine(game.actor,choices[rng(choices.length)]);
       }else if(game.phase==='chairs'){
         if(game.red)game.timeout(v);
         else{const p=game.alive().find(p=>!game.seats.includes(p.id));game.chair(p.id,game.seats.findIndex(s=>s===null));}

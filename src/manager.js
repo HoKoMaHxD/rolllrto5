@@ -1,5 +1,5 @@
 import { Game } from './engine.js';
-import { gamePayload,gameComponents,controlComponents,shopPayload,winPayload } from './views.js';
+import { gamePayload,gameComponents,controlComponents,shopPayload,winPayload,resultsPayload,lobbyContent } from './views.js';
 
 export class SerialQueue {
   constructor(){this.tails=new Map();}
@@ -14,6 +14,7 @@ export class GameManager {
   constructor(store,config,{payload=gamePayload,winner=winPayload,now=()=>Date.now()}={}){
     this.store=store;this.config=config;this.queue=new SerialQueue();this.games=new Map();this.now=now;
     this.payload=payload;this.winnerPayload=winner;
+    this.eyes={};
     store.db.exec('CREATE TABLE IF NOT EXISTS active_messages (game TEXT PRIMARY KEY, channel TEXT, main TEXT, controls TEXT, extra TEXT)');
   }
   remember(e){this.store.db.prepare('INSERT OR REPLACE INTO active_messages(game,channel,main,controls,extra) VALUES(?,?,?,?,?)').run(e.game.id,e.channel.id,e.main?.id||null,e.controls?.id||null,e.extra?.id||null);}
@@ -40,38 +41,85 @@ export class GameManager {
     const g=e.game;
     if(['ended','cancelled'].includes(g.phase)){
       clearTimeout(e.timer);
+      if(e.announced)return;
       // Commit the result before doing network I/O. Repeated calls cannot award twice.
       const stats=g.winner?this.store.reward(g.id,g.guild,g.winner):null;
       try{
-        if(e.main)await e.main.edit({components:[]});
-        if(e.controls)await e.controls.edit({components:[]});
-        if(e.extra)await e.extra.edit({components:[]});
-        if(!e.announced){
-          const payload=g.phase==='ended'?await this.winnerPayload(g,stats,this.config.name):{content:g.cancelReason,allowedMentions:{parse:[]}};
-          await e.channel.send(payload);e.announced=true;
-        }
+        await this.closePanel(e);
+        await this.publishResults(e);
+        const payload=g.phase==='ended'?await this.winnerPayload(g,stats):{content:g.cancelReason,allowedMentions:{parse:[]}};
+        await e.channel.send(payload);e.announced=true;
       }finally{this.forget(e);}
       return;
     }
+
+    const changed=g.version!==e.renderedVersion;
+    const registrationClosed=e.renderedPhase==='lobby'&&g.phase!=='lobby';
+    const sameChairPanel=e.renderedPhase==='chair-ready'&&g.phase==='chairs';
+    const replacePanel=e.main&&changed&&!sameChairPanel&&g.type!=='hide';
+    if(replacePanel||registrationClosed){
+      await this.closePanel(e);
+      e.main=null;
+      this.remember(e);
+    }
+    if(registrationClosed&&g.type==='roulette'){
+      await e.channel.send({content:'تم الانتهاء من تسجيل جميع اللاعبين',allowedMentions:{parse:[]}});
+    }
+    if(g.phase==='intermission'){
+      if(e.main)await this.closePanel(e); // Preserve the eye positions visibly on the hide board.
+      await this.publishResults(e);
+      if(!g.deadline)g.deadline=this.now()+g.duration;
+      this.armTimer(e);
+      return;
+    }
+    if(g.phase!=='chairs')await this.publishResults(e);
     if(!g.deadline)g.deadline=this.now()+g.duration;
-    const payload=await this.payload(g,this.config.name);
+    const payload=await this.payload(g);
+    const board=gameComponents(g,{eyes:this.eyes});
+    const controls=controlComponents(g);
+    const inlineControls=board.length<5;
+    payload.components=board.slice(0,5).concat(inlineControls?controls:[]);
     // Membership updates reuse the existing banner instead of reuploading a PNG for every click.
-    if(e.main&&g.phase==='lobby'&&e.renderedVersion===g.version){delete payload.files;delete payload.attachments;}
+    if(e.main&&g.phase==='lobby'&&!changed){delete payload.files;delete payload.attachments;}
     if(e.main)await e.main.edit(payload);else e.main=await e.channel.send(payload);
     e.renderedVersion=g.version;
+    e.renderedPhase=g.phase;
     this.remember(e);
-    const extraRows=gameComponents(g).slice(5,10);
+    const extraRows=board.slice(5,10);
     if(extraRows.length){
       const extra={content:'بقية الخيارات',components:extraRows,allowedMentions:{parse:[]}};
       if(e.extra)await e.extra.edit(extra);else e.extra=await e.channel.send(extra);
       this.remember(e);
     }else if(e.extra)await e.extra.edit({content:'—',components:[]});
-    const components=controlComponents(g);
-    if(components.length){
-      const controls={content:'خيارات القيم',components,allowedMentions:{parse:[]}};
-      if(e.controls)await e.controls.edit(controls);else e.controls=await e.channel.send(controls);
+    if(!inlineControls&&controls.length){
+      const options={content:'خيارات القيم',components:controls,allowedMentions:{parse:[]}};
+      if(e.controls)await e.controls.edit(options);else e.controls=await e.channel.send(options);
       this.remember(e);
     }
+    this.armTimer(e);
+  }
+  async closePanel(e){
+    const keepBoard=['duel','seeking'].includes(e.renderedPhase);
+    const board=keepBoard?gameComponents(e.game,{phase:e.renderedPhase,locked:true,eyes:this.eyes}):[];
+    const messages=[{message:e.main,components:board},{message:e.extra,components:[]},{message:e.controls,components:[]}];
+    await Promise.all(messages.map(async ({message,components})=>{
+      if(!message)return;
+      const update={components,allowedMentions:{parse:[]}};
+      if(message===e.main&&e.renderedPhase==='lobby')update.content=lobbyContent(e.game);
+      try{await message.edit(update);}
+      catch(error){if(error.code!==10008)throw error;} // A deleted round has no buttons left to close.
+    }));
+    e.extra=null;
+    e.controls=null;
+  }
+  async publishResults(e){
+    const results=e.game.results;
+    if(!results.length)return;
+    await e.channel.send(resultsPayload(e.game,results));
+    e.game.results=[];
+  }
+  armTimer(e){
+    const g=e.game;
     clearTimeout(e.timer);
     const version=g.version;
     e.timer=setTimeout(()=>{this.queue.run(e.channel.id,async()=>{
@@ -92,30 +140,31 @@ export class GameManager {
       const e=this.games.get(channelId);
       if(!e||e.game.id!==id||e.game.guild!==guildId)throw new Error('انتهى هذا القيم أو أُعيد تشغيل البوت.');
       const g=e.game;
+      g.check(version);
       // A late request must not beat an expired timer that is still in the event queue.
       if(g.deadline && receivedAt>=g.deadline){g.timeout(g.version);try{await this.sync(e);}catch(error){await this.fail(e,error);}throw new Error('انتهت مهلة هذا الدور.');}
-      g.check(version);
-      let response='تم.',dirty=true;
+      let response=null,dirty=true;
       switch(action){
-        case 'join':g.add({...user,joinedAt:receivedAt});response=`دخلت القيم. المشاركين: ${g.players.length}. رقمك يظهر بعد البداية.`;break;
-        case 'leave':g.remove(user.id);response='خرجت من التسجيل.';break;
+        case 'join':g.add({...user,joinedAt:receivedAt});response='تم الدخول';break;
+        case 'leave':g.remove(user.id);response='تم الخروج';break;
         case 'shop':g.requirePlayer(user.id);if(g.phase!=='lobby'||g.type!=='roulette')throw new Error('المتجر مغلق.');await respond(shopPayload(g,user.id));return;
         case 'buy':g.buy(user.id,value);await respond({...shopPayload(g,user.id),content:'تم الشراء ✅'});return;
         case 'kick':g.kick(user.id,value);break;
-        case 'withdraw':g.withdraw(user.id);response='انسحبت من القيم.';break;
+        case 'random-kick':g.kick(user.id,null);break;
+        case 'withdraw':g.withdraw(user.id);break;
         case 'reveal':{
           const ids=g.reveal(user.id);response=ids.length?`🔎 معهم مرتدة الآن: ${ids.map(x=>`<@${x}>`).join('، ')}\nتم استهلاك كشف واحد.`:'🔎 لا يوجد لاعب متبقٍ معه مرتدة. تم استهلاك كشف واحد.';dirty=false;break;
         }
-        case 'nuke':g.nuke(user.id);response='☢️ استخدمت القنبلة النووية!';break;
+        case 'nuke':g.nuke(user.id);break;
         case 'hide':g.hide(user.id,Number(value));response=`اختبأت في المربع ${value}. اختيارك سري.`;break;
         case 'seek':g.seek(user.id,Number(value));break;
-        case 'chair':g.chair(user.id,Number(value));response=g.player(user.id).alive?'حجزت كرسيك ✅':'ضغطت الأحمر وخرجت 🔴';break;
+        case 'chair':g.chair(user.id,Number(value));break;
         case 'mine':g.mine(user.id,Number(value));break;
         default:throw new Error('زر غير معروف.');
       }
       // Result persistence must not depend on the ephemeral confirmation succeeding.
       if(g.winner)this.store.reward(g.id,g.guild,g.winner);
-      await respond({content:response,embeds:[],components:[],allowedMentions:{parse:[]}});
+      if(response)await respond({content:response,embeds:[],components:[],allowedMentions:{parse:[]}});
       if(dirty){
         if(g.version===version)this.scheduleSync(e);
         else try{await this.sync(e);}catch(error){await this.fail(e,error);}

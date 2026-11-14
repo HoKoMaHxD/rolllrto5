@@ -1,12 +1,14 @@
 import { randomInt, randomUUID } from 'node:crypto';
 
-const DEFAULTS = { maxPlayers:50,lobbyMs:20000,turnMs:20000,hideMs:20000,chairMs:10000,reverseMs:4000 };
+export const MINE_SQUARES = 9;
+const DEFAULTS = { maxPlayers:50,lobbyMs:20000,turnMs:20000,hideMs:20000,chairMs:10000,reverseMs:4000,roundGapMs:5000 };
 export class Game {
   constructor({ type, guild, channel, host, store, settings={}, rng=n=>randomInt(n), id=randomUUID() }) {
     if (!['roulette','hide','chairs','mines','reverse'].includes(type)) throw new Error('لعبة غير معروفة.');
     Object.assign(this,{type,guild,channel,host,store,rng,id,settings:{...DEFAULTS,...settings}});
     this.players=[]; this.phase='lobby'; this.version=0; this.duration=this.settings.lobbyMs;
-    this.deadline=0; this.round=0; this.actor=null; this.winner=null; this.notes=[]; this.turnBag=[];
+    this.deadline=0; this.round=0; this.actor=null; this.winner=null; this.turnBag=[];
+    this.results=[];
   }
   alive() { return this.players.filter(p=>p.alive); }
   player(id) { return this.players.find(p=>p.id===id); }
@@ -14,7 +16,6 @@ export class Game {
   check(version) { if(this.phase==='ended'||this.phase==='cancelled') throw new Error('انتهى هذا القيم.'); if(version!==this.version) throw new Error('انتهى هذا الدور؛ استخدم الأزرار الجديدة.'); }
   stage(phase,duration) { this.phase=phase; this.version++; this.duration=duration; this.deadline=0; }
   choose(list) { return list[this.rng(list.length)]; }
-  note(text) { this.notes.push(text); this.notes=this.notes.slice(-3); }
   add(profile) {
     if(this.phase!=='lobby') throw new Error('بدأ القيم وانتهى وقت الدخول.');
     if(this.player(profile.id)) throw new Error('أنت داخل القيم بالفعل.');
@@ -22,7 +23,7 @@ export class Game {
     this.players.push({...profile,alive:true,number:null,spot:null});
   }
   remove(id) {
-    if(this.phase!=='lobby') return this.withdraw(id);
+    if(this.phase!=='lobby') throw new Error('انتهى التسجيل.');
     const p=this.player(id); if(!p) throw new Error('أنت غير مسجل.');
     this.players=this.players.filter(p=>p.id!==id);
   }
@@ -51,8 +52,21 @@ export class Game {
     }
     return this.turnBag.pop();
   }
-  next() {
+  next(sameDuel=false) {
     if(this.finishIfNeeded()) return;
+    if(this.settings.roundGapMs && (this.round || this.phase==='hiding' || this.type==='chairs')) {
+      this.sameDuel=sameDuel;
+      this.stage(this.type==='chairs'?'chair-ready':'intermission',this.settings.roundGapMs);
+      return;
+    }
+    this.beginRound(sameDuel);
+  }
+  beginRound(sameDuel=false) {
+    if(sameDuel) {
+      this.actor=this.duel.find(id=>id!==this.actor);
+      this.stage('duel',this.settings.turnMs);
+      return;
+    }
     this.round++;
     if(this.type==='roulette'||this.type==='hide') { this.actor=this.nextActor(); this.stage(this.type==='hide'?'seeking':'turn',this.settings.turnMs); }
     else if(this.type==='reverse') { this.actor=this.choose(this.alive()).id; this.stage('reverse',this.settings.reverseMs); }
@@ -64,17 +78,30 @@ export class Game {
     } else if(this.type==='mines') {
       const alive=this.alive(); const survivor=alive.find(p=>p.id===this.survivor);
       const a=survivor || this.choose(alive), b=this.choose(alive.filter(p=>p.id!==a.id));
-      this.duel=[a.id,b.id]; this.actor=this.choose(this.duel); this.bomb=this.rng(6)+1; this.picked=new Set();
+      this.duel=[a.id,b.id]; this.actor=this.choose(this.duel); this.bomb=this.rng(MINE_SQUARES)+1; this.picked=new Set();
       this.stage('duel',this.settings.turnMs);
     }
   }
-  kill(id,reason) { const p=this.player(id); if(!p?.alive) return; p.alive=false; this.note(`<@${id}> ${reason}`); }
+  kill(id,reason,{bomb=false,survivor=null,withdrawn=false}={}) {
+    const player=this.player(id);
+    if(!player?.alive)return;
+    player.alive=false;
+    this.results.push({id,reason,bomb,survivor,withdrawn});
+  }
   turn(id) { this.requirePlayer(id); if(this.actor!==id) throw new Error('هذا ليس دورك.'); }
+  canKickRandomly() { return this.type==='roulette'&&this.phase==='turn'&&this.alive().length>9; }
   kick(id,target) {
     if(this.phase!=='turn') throw new Error('الطرد غير متاح الآن.');
-    this.turn(id); this.requirePlayer(target); if(id===target) throw new Error('لا تستطيع طرد نفسك؛ استخدم انسحاب.');
-    if(this.store.consume(this.guild,target,'reflect')) this.kill(id,`انطرد بسبب مرتدة <@${target}> 🛡️`);
-    else this.kill(target,`انطرد بواسطة <@${id}>.`);
+    this.turn(id);
+    if(target===null){
+      if(!this.canKickRandomly())throw new Error('الطرد العشوائي يتقفل عند بقاء 9 لاعبين أو أقل.');
+      const targets=this.alive().filter(player=>player.id!==id);
+      target=this.choose(targets).id;
+    }
+    this.requirePlayer(target);
+    if(id===target) throw new Error('لا تستطيع طرد نفسك؛ استخدم انسحاب.');
+    if(this.store.consume(this.guild,target,'reflect')) this.kill(id,`بسبب مرتدة <@${target}> 🛡️`);
+    else this.kill(target);
     this.next();
   }
   reveal(id) {
@@ -86,7 +113,8 @@ export class Game {
   nuke(id) {
     if(this.phase!=='turn') throw new Error('النووي متاح في دورك في الروليت فقط.');
     this.turn(id); if(!this.store.consume(this.guild,id,'nuke')) throw new Error('لا تملك قنبلة نووية.');
-    this.alive().filter(p=>p.id!==id).forEach(p=>{p.alive=false;}); this.note(`☢️ <@${id}> استخدم القنبلة النووية!`); this.finishIfNeeded();
+    for(const player of this.alive())if(player.id!==id)this.kill(player.id,'بالقنبلة النووية ☢️');
+    this.finishIfNeeded();
   }
   hide(id,spot) {
     if(this.phase!=='hiding') throw new Error('انتهت مهلة الاختباء.'); this.requirePlayer(id);
@@ -99,8 +127,7 @@ export class Game {
     if(!Number.isInteger(spot)||spot<1||spot>25||this.opened.has(spot)) throw new Error('هذا المربع مفتوح أو غير صالح.');
     this.opened.add(spot);
     const victims=this.alive().filter(p=>p.spot===spot);
-    for(const p of victims) this.kill(p.id,`انكشف في المربع ${spot} وخرج 👁️`);
-    if(!victims.length) this.note(`المربع ${spot} فارغ.`);
+    for(const p of victims) this.kill(p.id,`بعد كشف المربع ${spot} 👁️`);
     this.next();
   }
   chair(id,seat) {
@@ -108,42 +135,41 @@ export class Game {
     if(!Number.isInteger(seat)||seat<0||seat>=this.seats.length||this.seats[seat]) throw new Error('هذا الكرسي محجوز أو غير صالح.');
     if(this.seats.includes(id)) throw new Error('حجزت كرسيك بالفعل.');
     this.seats[seat]=id;
-    if(this.red){ this.kill(id,'ضغط على الأحمر وخرج 🔴'); this.finishIfNeeded(); }
+    if(this.red){ this.kill(id,'لأنه ضغط الأحمر 🔴'); this.finishIfNeeded(); }
     else if(this.seats.every(Boolean)){
-      for(const p of this.alive()) if(!this.seats.includes(p.id)) this.kill(p.id,'لم يحجز كرسيًا وخرج.');
+      for(const p of this.alive()) if(!this.seats.includes(p.id)) this.kill(p.id,'لعدم حجز كرسي.');
       this.next();
     }
   }
   mine(id,number) {
     if(this.phase!=='duel') throw new Error('المواجهة غير متاحة الآن.'); this.turn(id);
-    if(!Number.isInteger(number)||number<1||number>6||this.picked.has(number)) throw new Error('هذا الرقم مكشوف أو غير صالح.');
+    if(!Number.isInteger(number)||number<1||number>MINE_SQUARES||this.picked.has(number)) throw new Error('هذا الرقم مكشوف أو غير صالح.');
     this.picked.add(number);
-    if(number===this.bomb) { this.kill(id,`اختار اللغم رقم ${number} وانفجر 💣`); this.survivor=this.duel.find(x=>x!==id); this.next(); }
-    else { this.note(`<@${id}> اختار ${number} وكان آمنًا.`); this.actor=this.duel.find(x=>x!==id); this.stage('duel',this.settings.turnMs); }
+    if(number===this.bomb) {
+      this.survivor=this.duel.find(x=>x!==id);
+      this.kill(id,null,{bomb:true,survivor:this.survivor});
+      this.next();
+    } else this.next(true);
   }
   withdraw(id) {
+    if(this.type!=='roulette')throw new Error('الانسحاب متاح في الروليت العادي فقط.');
     if(this.phase==='lobby')throw new Error('استخدم زر خروج أثناء التسجيل.');
+    if(this.phase!=='turn')throw new Error('الانسحاب متاح أثناء الجولة.');
     this.requirePlayer(id);
-    if(['ended','cancelled'].includes(this.phase)) throw new Error('انتهى القيم.');
-    this.kill(id,'انسحب من القيم.');
-    if(this.finishIfNeeded()) return;
-    if(this.phase==='hiding') { if(this.alive().every(p=>p.spot!==null)) this.next(); }
-    else if(this.phase==='chairs') {
-      // A withdrawal removes a participant; restart with the correct number of seats.
-      this.next();
-    } else if(this.phase==='duel'&&this.duel.includes(id)) { this.survivor=this.duel.find(x=>x!==id); this.next(); }
-    else if(this.actor===id) this.next();
+    this.kill(id,null,{withdrawn:true});
+    if(!this.finishIfNeeded()&&this.actor===id)this.next();
   }
   timeout(version) {
     if(version!==this.version || ['ended','cancelled'].includes(this.phase)) return false;
     if(this.phase==='lobby') this.start();
-    else if(this.phase==='hiding') { for(const p of this.alive()) if(p.spot===null) this.kill(p.id,'لم يختبئ في الوقت المحدد.'); this.next(); }
+    else if(this.phase==='intermission'||this.phase==='chair-ready') this.beginRound(this.sameDuel);
+    else if(this.phase==='hiding') { for(const p of this.alive()) if(p.spot===null) this.kill(p.id,'لعدم الاختباء في الوقت المحدد.'); this.next(); }
     else if(this.phase==='chairs') {
-      if(!this.red) for(const p of this.alive()) if(!this.seats.includes(p.id)) this.kill(p.id,'انتهى الوقت دون حجز كرسي.');
+      if(!this.red) for(const p of this.alive()) if(!this.seats.includes(p.id)) this.kill(p.id,'لعدم حجز كرسي.');
       this.next();
     } else {
-      this.kill(this.actor,this.phase==='reverse'?'اختارته الروليت العكسية وخرج.':'انتهت مهلة اختياره وخرج ⏱️');
       if(this.phase==='duel') this.survivor=this.duel.find(x=>x!==this.actor);
+      this.kill(this.actor,this.phase==='reverse'?undefined:'لانتهاء مهلة الاختيار ⏱️',{survivor:this.phase==='duel'?this.survivor:null});
       this.next();
     }
     return true;

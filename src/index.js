@@ -4,6 +4,7 @@ import { config,PREFIXES,ITEMS } from './config.js';
 import { Store } from './store.js';
 import { GameManager } from './manager.js';
 import { registerCommands } from './commands.js';
+import { prepareEyes } from './eyes.js';
 
 if(!config.token||config.token==='PUT_YOUR_BOT_TOKEN_HERE'){
   console.error('ضع BOT_TOKEN في .env أو في متغيرات الاستضافة. لا ترسل التوكن لأي شخص.');process.exit(1);
@@ -17,7 +18,7 @@ const profile=(user,member)=>({id:user.id,name:member?.displayName||member?.nick
 const help=()=>new EmbedBuilder().setColor(0xa76acb).setTitle('🎮 ألعاب السيرفر').setDescription([
   '`+r` روليت • اختر من تطرده، ولديك 20 ثانية افتراضيًا.',
   '`+h` هايد • اختبئ في مربع ثم اكشف مخابئ الآخرين.',
-  '`+m` ألغام • مواجهة برقم من 1 إلى 6، ولغم واحد.',
+  '`+m` ألغام • مواجهة على لوحة 3×3 فيها لغم واحد.',
   '`+c` كراسي • احجز الأخضر، ولا تضغط الأحمر.',
   '`-r` روليت عكسي • من تختاره الروليت يخرج تلقائيًا.',
   '', 'المتجر في تسجيل الروليت: مرتدة **2**، كشف **1**، نووي **10** نقاط.',
@@ -29,6 +30,7 @@ const help=()=>new EmbedBuilder().setColor(0xa76acb).setTitle('🎮 ألعاب �
 client.once(Events.ClientReady,async c=>{
   console.log(`جاهز: ${c.user.tag} | +r +h +m +c -r`);
   await manager.recover(c);
+  manager.eyes=await prepareEyes(c.application);
   ready=true;
   try{const count=await registerCommands(config.token,c.user.id,config.guildId);console.log(`تم تسجيل ${count} أوامر ${config.guildId?'في السيرفر المحدد':'عالميًا'}.`);}
   catch(error){console.error('[SLASH_REGISTER]',error.code||error.name,'تحقق من GUILD_ID وإضافة البوت بنطاق applications.commands.');}
@@ -53,18 +55,25 @@ client.on(Events.MessageCreate,async message=>{
 
 // Deduplicate gateway redelivery. A separate click has its own interaction ID.
 const seen=new Set();
+const privateReplyButtons=new Set(['join','leave','shop','buy','reveal','hide']);
 client.on(Events.InteractionCreate,async i=>{
   if(!i.isButton()&&!i.isChatInputCommand())return;
   if(i.isButton()&&!i.customId.startsWith('ag:'))return;
   if(seen.has(i.id))return;seen.add(i.id);if(seen.size>5000)seen.delete(seen.values().next().value);
+  const buttonData=i.isButton()?i.customId.split(':'):null;
+  const silent=buttonData&&!privateReplyButtons.has(buttonData[3]);
   try{
     // Acknowledge before rendering or waiting for a per-channel queue.
-    await i.deferReply({flags:MessageFlags.Ephemeral});
+    if(silent)await i.deferUpdate();
+    else await i.deferReply({flags:MessageFlags.Ephemeral});
     if(!i.inGuild())throw new Error('استخدم البوت داخل السيرفر.');
     if(!ready||closing)throw new Error('البوت يجهز الآن؛ حاول بعد لحظات.');
-    const respond=payload=>i.editReply(payload).catch(error=>console.error('[REPLY]',error.code||error.name));
+    const respond=payload=>{
+      if(silent)return;
+      return i.editReply(payload).catch(error=>console.error('[REPLY]',error.code||error.name));
+    };
     if(i.isButton()){
-      const [,id,version,action,value]=i.customId.split(':');
+      const [,id,version,action,value]=buttonData;
       await manager.click({channelId:i.channelId,guildId:i.guildId,id,version:Number(version),action,value,user:profile(i.user,i.member),receivedAt:i.createdTimestamp,respond});
     }else if(['اضافة','ازالة'].includes(i.commandName)){
       if(!admin(i.user.id,i.memberPermissions))throw new Error('إدارة النقاط متاحة للإدارة فقط.');
@@ -85,7 +94,8 @@ client.on(Events.InteractionCreate,async i=>{
     else await respond({content:'هذا الأمر غير مدعوم في هذا الإصدار.'});
   }catch(error){
     const payload={content:`❌ ${String(error.message||'حدث خطأ.').slice(0,1800)}`,allowedMentions:{parse:[]}};
-    if(i.deferred||i.replied)await i.editReply(payload).catch(()=>{});
+    if(silent&&i.deferred)await i.followUp({...payload,flags:MessageFlags.Ephemeral}).catch(()=>{});
+    else if(i.deferred||i.replied)await i.editReply(payload).catch(()=>{});
     else await i.reply({...payload,flags:MessageFlags.Ephemeral}).catch(()=>{});
   }
 });
