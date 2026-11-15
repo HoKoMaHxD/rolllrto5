@@ -2,12 +2,13 @@ import { createCanvas, GlobalFonts, loadImage } from '@napi-rs/canvas';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { ROOT, GAME_NAMES } from './config.js';
+import { ROOT, BRAND_NAME, GAME_NAMES } from './config.js';
 
 GlobalFonts.registerFromPath(path.join(ROOT,'assets/fonts/NotoKufiArabic-Bold.ttf'),'ArenaArabic');
 GlobalFonts.registerFromPath(path.join(ROOT,'assets/fonts/DejaVuSans.ttf'),'ArenaLatin');
 const purple='#ba7be7', ink='#19191f', white='#f5f0fa';
 let bgPromise;
+let logoPromise;
 const avatarCache=new Map();
 const clean=s=>String(s||'Player').replace(/[\u0000-\u001f\u202a-\u202e\u2066-\u2069]/g,'');
 function text(ctx,s,x,y,size=34,color=white,maxWidth=900,align='center') {
@@ -23,6 +24,50 @@ function box(ctx,x,y,w,h,r=20,fill='#24222c',stroke='#40334c') {
   ctx.beginPath();ctx.roundRect(x,y,w,h,r);ctx.fillStyle=fill;ctx.fill();
   if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=2;ctx.stroke();}
 }
+
+function brandLogo() {
+  logoPromise ??= loadImage(path.join(ROOT,'assets/snow-logo.png'));
+  return logoPromise;
+}
+
+export async function stampBrand(ctx,centerX,y) {
+  const logo=await brandLogo();
+  const height=43;
+  const width=height*logo.width/logo.height;
+  const gap=12;
+
+  ctx.save();
+  ctx.font='bold 25px ArenaLatin';
+  ctx.textAlign='left';
+  ctx.textBaseline='middle';
+  ctx.direction='ltr';
+  const startX=centerX-(width+gap+ctx.measureText(BRAND_NAME).width)/2;
+  ctx.drawImage(logo,startX,y-height/2,width,height);
+  ctx.fillStyle='#e2efff';
+  ctx.shadowColor='#488fcd';
+  ctx.shadowBlur=9;
+  ctx.fillText(BRAND_NAME,startX+width+gap,y);
+  ctx.restore();
+}
+
+export async function brandAvatar() {
+  const size=512;
+  const canvas=createCanvas(size,size);
+  const ctx=canvas.getContext('2d');
+  const backdrop=ctx.createRadialGradient(230,185,24,256,256,345);
+  backdrop.addColorStop(0,'#1d3657');
+  backdrop.addColorStop(.65,'#0f1b31');
+  backdrop.addColorStop(1,'#090f1e');
+  ctx.fillStyle=backdrop;
+  ctx.fillRect(0,0,size,size);
+
+  const logo=await brandLogo();
+  const width=350;
+  const height=width*logo.height/logo.width;
+  ctx.drawImage(logo,(size-width)/2,(size-height)/2,width,height);
+  return canvas.toBuffer('image/png');
+}
+
 async function base(w,h) {
   const canvas=createCanvas(w,h),ctx=canvas.getContext('2d'); ctx.fillStyle=ink;ctx.fillRect(0,0,w,h);
   if(!bgPromise){const p=path.join(ROOT,'assets/ribbons.png');bgPromise=existsSync(p)?loadImage(p).catch(()=>null):Promise.resolve(null);}
@@ -184,7 +229,7 @@ function wheelDisc(ctx,radius,fill) {
 
 export async function winnerCard(player,stats) {
   const {canvas,ctx}=await base(1200,960);
-  text(ctx,'ARENA GAMES',600,49,22,'#9e85b3',900);
+  await stampBrand(ctx,525,51);
 
   ctx.save();
   ctx.translate(750,133);

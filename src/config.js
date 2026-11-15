@@ -2,6 +2,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const ROOT = fileURLToPath(new URL('../', import.meta.url));
+export const BRAND_NAME = 'SNOW GAMES';
 function integer(name, fallback, min, max) {
   const value = Number(process.env[name] || fallback);
   if (!Number.isInteger(value) || value < min || value > max) throw new Error(`${name} must be between ${min} and ${max}`);
